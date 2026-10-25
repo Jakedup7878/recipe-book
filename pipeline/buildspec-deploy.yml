@@ -1,0 +1,17 @@
+# CodeBuild: Deploy stage (runs only after the manual approval). Deploys the
+# exact cloud assembly built and diffed in the Synth stage, which arrives as the
+# SynthOutput input artifact. The source artifact only supplies the pinned CDK CLI.
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 24
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/infra" && npm ci --no-audit --no-fund
+  build:
+    commands:
+      # --require-approval never: the pipeline's manual approval stage is the review gate.
+      - >-
+        cd "$CODEBUILD_SRC_DIR/infra" && npx cdk deploy RecipeBook
+        --app "$CODEBUILD_SRC_DIR_SynthOutput" --require-approval never --progress events

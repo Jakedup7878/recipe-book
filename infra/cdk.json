@@ -4,5 +4,11 @@
     "include": ["**"],
     "exclude": [".venv", "node_modules", "cdk.out", "**/__pycache__"]
   },
-  "context": {}
+  "context": {
+    "github": {
+      "owner": "Jakedup7878",
+      "repo": "recipe-book",
+      "branch": "main"
+    }
+  }
 }

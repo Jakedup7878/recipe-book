@@ -3,4 +3,5 @@ boto3
 uvicorn==0.54.0
 httpx
 pytest==8.4.2
+pyyaml
 moto[dynamodb]==5.1.14

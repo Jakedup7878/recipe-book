@@ -1,0 +1,24 @@
+# CodeBuild: Test stage. Runs the backend and infrastructure tests.
+version: 0.2
+
+env:
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.13
+    commands:
+      - pip install --quiet -r "$CODEBUILD_SRC_DIR/backend/requirements-dev.txt" -r "$CODEBUILD_SRC_DIR/infra/requirements.txt"
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR"
+      - python -m pytest backend/tests infra/tests -q --junitxml=test-results.xml
+
+reports:
+  recipe-book-tests:
+    files:
+      - test-results.xml
+    base-directory: $CODEBUILD_SRC_DIR
+    file-format: JUNITXML

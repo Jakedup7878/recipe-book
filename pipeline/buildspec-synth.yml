@@ -1,0 +1,30 @@
+# CodeBuild: Synth stage. Builds the deployable cloud assembly (CloudFormation
+# templates plus the bundled Lambda and website files) and prints what would
+# change in AWS. This project may only assume CDK's read-only lookup role, so
+# nothing here can deploy.
+version: 0.2
+
+env:
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.13
+      nodejs: 24
+    commands:
+      - pip install --quiet -r "$CODEBUILD_SRC_DIR/infra/requirements.txt"
+      - cd "$CODEBUILD_SRC_DIR/infra" && npm ci --no-audit --no-fund
+  build:
+    commands:
+      # cdk.json's "app" points at the Windows virtualenv used locally, so name the app explicitly.
+      - cd "$CODEBUILD_SRC_DIR/infra" && npx cdk synth RecipeBook --app "python app.py" --strict --output cdk.out
+      - >-
+        cd "$CODEBUILD_SRC_DIR/infra" && npx cdk diff RecipeBook --app cdk.out
+        || echo "Could not compute a diff. Review the RecipeBook template in the SynthOutput artifact before approving."
+
+artifacts:
+  base-directory: infra/cdk.out
+  files:
+    - "**/*"
