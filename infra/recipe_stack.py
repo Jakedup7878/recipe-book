@@ -90,8 +90,10 @@ class RecipeBookStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # NOTE: DESTROY policies make `cdk destroy` remove all data, which suits a
-        # prototype. Switch the table and user pool to RETAIN before real users arrive.
+        # The table and user pool hold real data (recipes, accounts), so they are RETAINed:
+        # deleting the stack or a change that replaces them leaves the old one in place.
+        # `cdk destroy` won't remove them; delete them by hand if you really mean to.
+        # Everything else is rebuildable and is DESTROYed with the stack.
 
         table = dynamodb.TableV2(
             self, "Table",
@@ -104,7 +106,7 @@ class RecipeBookStack(Stack):
                 partition_key=dynamodb.Attribute(name="gsi1pk", type=dynamodb.AttributeType.STRING),
                 sort_key=dynamodb.Attribute(name="gsi1sk", type=dynamodb.AttributeType.STRING),
             )],
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=RemovalPolicy.RETAIN,
         )
 
         # ---- Website: private S3 bucket served only through CloudFront ----
@@ -165,7 +167,7 @@ class RecipeBookStack(Stack):
                 require_digits=True, require_symbols=False),
             account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
             feature_plan=cognito.FeaturePlan.LITE,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=RemovalPolicy.RETAIN,
         )
         web_client = user_pool.add_client(
             "WebClient",
