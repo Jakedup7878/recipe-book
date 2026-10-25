@@ -14,12 +14,15 @@ from aws_cdk import (
     aws_apigatewayv2 as apigw,
     aws_apigatewayv2_authorizers as authorizers,
     aws_apigatewayv2_integrations as integrations,
+    aws_certificatemanager as acm,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
     aws_cognito as cognito,
     aws_dynamodb as dynamodb,
     aws_lambda as lambda_,
     aws_logs as logs,
+    aws_route53 as route53,
+    aws_route53_targets as route53_targets,
     aws_s3 as s3,
     aws_s3_deployment as s3deploy,
 )
@@ -86,8 +89,35 @@ ROUTES = [
 ]
 
 
+# Viewer-request CloudFront Function (not Lambda@Edge): sends www., the default
+# *.cloudfront.net name and anything else to the one canonical domain.
+CANONICAL_HOST_FUNCTION = """
+function handler(event) {
+  var request = event.request;
+  var host = request.headers.host ? request.headers.host.value : "";
+  if (host === "__DOMAIN__") {
+    return request;
+  }
+  var query = Object.keys(request.querystring).map(function (key) {
+    return key + "=" + request.querystring[key].value;
+  }).join("&");
+  return {
+    statusCode: 301,
+    statusDescription: "Moved Permanently",
+    headers: { location: { value: "https://__DOMAIN__" + request.uri + (query ? "?" + query : "") } },
+  };
+}
+"""
+
+
 class RecipeBookStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, *, domain: dict | None = None, **kwargs) -> None:
+        """`domain` (optional): {"name": "example.com", "certificateArn": ..., "hostedZoneId": ...}.
+
+        The certificate must already be ISSUED in us-east-1 (CloudFront only uses certificates
+        from there, and this project can't run CloudFormation in us-east-1) and must cover both
+        the name and www.<name>. The hosted zone is the one Route 53 created for the domain.
+        """
         super().__init__(scope, construct_id, **kwargs)
 
         # The table and user pool hold real data (recipes, accounts), so they are RETAINed:
@@ -140,17 +170,48 @@ class RecipeBookStack(Stack):
                     access_control_max_age=Duration.days(365), include_subdomains=True, override=True),
             ),
         )
+        custom_domain = {}
+        function_associations = []
+        if domain:
+            apex = domain["name"].strip().lower().rstrip(".")
+            canonical_host = cloudfront.Function(
+                self, "CanonicalHost",
+                code=cloudfront.FunctionCode.from_inline(CANONICAL_HOST_FUNCTION.replace("__DOMAIN__", apex)),
+                runtime=cloudfront.FunctionRuntime.JS_2_0,
+                comment=f"Redirect every other host name to {apex}",
+            )
+            function_associations = [cloudfront.FunctionAssociation(
+                function=canonical_host, event_type=cloudfront.FunctionEventType.VIEWER_REQUEST)]
+            custom_domain = {
+                "domain_names": [apex, f"www.{apex}"],
+                "certificate": acm.Certificate.from_certificate_arn(self, "SiteCertificate",
+                                                                    domain["certificateArn"]),
+            }
+
         distribution = cloudfront.Distribution(
             self, "Site",
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3BucketOrigin.with_origin_access_control(site_bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 response_headers_policy=headers,
+                function_associations=function_associations,
             ),
             default_root_object="index.html",
             price_class=cloudfront.PriceClass.PRICE_CLASS_100,
+            **custom_domain,
         )
-        site_url = f"https://{distribution.distribution_domain_name}/"
+
+        if domain:
+            zone = route53.HostedZone.from_hosted_zone_attributes(
+                self, "Zone", hosted_zone_id=domain["hostedZoneId"], zone_name=apex)
+            target = route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(distribution))
+            for record_id, record_name in (("Apex", None), ("Www", "www")):
+                route53.ARecord(self, f"{record_id}A", zone=zone, record_name=record_name, target=target)
+                route53.AaaaRecord(self, f"{record_id}Aaaa", zone=zone, record_name=record_name, target=target)
+            site_host = apex
+        else:
+            site_host = distribution.distribution_domain_name
+        site_url = f"https://{site_host}/"
 
         # ---- Accounts: Cognito user pool, used by the site's own sign-in pages ----
         # Keep the password policy in sync with backend/local_dev.py and frontend/app.js.
@@ -215,7 +276,7 @@ class RecipeBookStack(Stack):
         http_api = apigw.HttpApi(
             self, "HttpApi",
             cors_preflight=apigw.CorsPreflightOptions(
-                allow_origins=[f"https://{distribution.distribution_domain_name}"],
+                allow_origins=[f"https://{site_host}"],  # the only host the site is served from
                 allow_methods=[apigw.CorsHttpMethod.GET, apigw.CorsHttpMethod.POST,
                                apigw.CorsHttpMethod.PUT, apigw.CorsHttpMethod.DELETE],
                 allow_headers=["Authorization", "Content-Type"],

@@ -9,9 +9,11 @@ app = cdk.App()
 # Every Regional resource must live in the project's selected Region.
 env = cdk.Environment(account=os.environ.get("CDK_DEFAULT_ACCOUNT"), region="us-east-2")
 
+domain = app.node.try_get_context("domain") or {}
 RecipeBookStack(
     app, "RecipeBook",
     env=env,
+    domain=domain if domain.get("name") else None,
     description="Recipe Book web app: Cognito accounts, Python API, DynamoDB, CloudFront site",
 )
 
