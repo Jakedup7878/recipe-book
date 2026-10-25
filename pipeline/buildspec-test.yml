@@ -1,4 +1,5 @@
-# CodeBuild: Test stage. Runs the backend and infrastructure tests.
+# CodeBuild: Test stage. Runs the backend, frontend and infrastructure tests.
+# Node.js is installed so the frontend syntax checks run instead of skipping.
 version: 0.2
 
 env:
@@ -9,6 +10,7 @@ phases:
   install:
     runtime-versions:
       python: 3.13
+      nodejs: 24
     commands:
       - pip install --quiet -r "$CODEBUILD_SRC_DIR/backend/requirements-dev.txt" -r "$CODEBUILD_SRC_DIR/infra/requirements.txt"
   build:

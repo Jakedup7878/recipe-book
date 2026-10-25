@@ -8,6 +8,7 @@
 let config;
 const view = document.getElementById("view");
 const nav = document.getElementById("nav");
+const footer = document.getElementById("footer-links");
 const notice = document.getElementById("notice");
 const Theme = window.RecipeTheme;
 
@@ -28,8 +29,9 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// Skips null/false like h() does: replaceChildren would print them as "null"/"false".
 function render(...nodes) {
-  view.replaceChildren(...nodes);
+  view.replaceChildren(...nodes.flat().filter((node) => node != null && node !== false));
 }
 
 function showNotice(message) {
@@ -236,27 +238,66 @@ async function loadMe() {
 
 // ---------- views ----------
 
+// The top bar is Home, Family and an account menu holding profile, appearance
+// and sign out. Signed out, it's Home plus the sign-in links; appearance is in
+// the footer so the look can still be changed without an account.
 function renderNav() {
   const page = (location.hash || "#/").split("/")[1] || "";
   const link = (href, label, key) =>
     h("a", { href, text: label, "aria-current": page === key ? "page" : null });
   const links = me
-    ? [
-        link("#/", "Recipes", ""),
-        link("#/new", "New recipe", "new"),
-        link("#/family", "Family", "family"),
-        link("#/appearance", "Appearance", "appearance"),
-        link("#/profile", me.displayName, "profile"),
-        h("button", { class: "secondary", onclick: signOut, text: "Sign out" }),
-      ]
+    ? [link("#/", "Home", ""), link("#/family", "Family", "family"), accountMenu(page)]
     : [
-        link("#/", "Recipes", ""),
-        link("#/appearance", "Appearance", "appearance"),
+        link("#/", "Home", ""),
         link("#/signin", "Sign in", "signin"),
         h("a", { class: "button", href: "#/signup", text: "Create account" }),
       ];
-  nav.replaceChildren(...links.filter(Boolean));
+  nav.replaceChildren(...links);
+  footer.replaceChildren(...(me ? [] : [link("#/appearance", "Appearance", "appearance")]));
 }
+
+// A disclosure (button + list of links) rather than an ARIA menu: it works
+// with Tab and Enter like the rest of the nav, and Escape closes it.
+function accountMenu(page) {
+  const menu = h("div", { class: "menu", id: "account-menu", hidden: true },
+    h("div", { class: "menu-head" },
+      h("strong", { text: me.displayName }),
+      h("div", { class: "muted", text: me.email })),
+    h("a", { href: "#/profile", text: "Your profile", "aria-current": page === "profile" ? "page" : null }),
+    h("a", { href: "#/appearance", text: "Appearance", "aria-current": page === "appearance" ? "page" : null }),
+    h("hr"),
+    h("button", { type: "button", class: "menu-item", text: "Sign out", onclick: signOut }));
+  const toggle = h("button", {
+    type: "button",
+    class: "account-button",
+    "aria-expanded": "false",
+    "aria-controls": "account-menu",
+    "aria-label": `Account menu for ${me.displayName}`,
+    "data-current": ["profile", "appearance"].includes(page) ? "true" : null,
+    onclick: () => setMenuOpen(menu.hidden),
+  }, avatar(me.displayName), h("span", { class: "account-name", text: me.displayName }),
+    h("span", { class: "caret", "aria-hidden": "true", text: "▾" }));
+  const wrap = h("div", { class: "account" }, toggle, menu);
+
+  function setMenuOpen(open, { focusToggle = false } = {}) {
+    menu.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    if (focusToggle) toggle.focus();
+  }
+  wrap.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !menu.hidden) setMenuOpen(false, { focusToggle: true });
+  });
+  wrap.addEventListener("focusout", (event) => {
+    if (!wrap.contains(event.relatedTarget)) setMenuOpen(false);
+  });
+  closeAccountMenu = () => setMenuOpen(false);
+  return wrap;
+}
+
+let closeAccountMenu = () => {};
+document.addEventListener("click", (event) => {
+  if (!event.target.closest?.(".account")) closeAccountMenu();
+});
 
 function recipeCard(recipe, { badge = true } = {}) {
   return h("article", { class: "card recipe-card" },
@@ -301,7 +342,7 @@ async function feedView() {
     ? recipeSection("Family recipes", `Only ${family.name} can see these`, feed.family,
         h("div", { class: "empty" },
           h("p", { text: "No family recipes yet." }),
-          h("a", { class: "button", href: "#/new", text: "Share one with your family" })))
+          h("a", { class: "button", href: "#/new/family", text: "Share one with your family" })))
     : recipeSection("Family recipes", null, [],
         h("div", { class: "card invite-card" },
           h("div", {},
@@ -312,8 +353,8 @@ async function feedView() {
   render(
     h("div", { class: "page-head" },
       h("div", {},
-        h("h1", { text: "Recipes" }),
-        h("div", { class: "muted", text: "Newest first." })),
+        h("h1", { text: "Home" }),
+        h("div", { class: "muted", text: "Every recipe you can see, newest first." })),
       h("a", { class: "button", href: "#/new", text: "New recipe" })),
     familySection,
     recipeSection("Public recipes", "Shared with everyone", feed.public,
@@ -400,7 +441,8 @@ async function recipeView(id) {
   );
 }
 
-async function recipeFormView(id) {
+// defaults.visibility preselects who can see a new recipe (#/new/family picks "family").
+async function recipeFormView(id, defaults = {}) {
   if (!me) return requireSignIn();
   const existing = id ? await api(`/recipes/${id}`) : null;
   const lines = (list) => (list || []).join("\n");
@@ -415,7 +457,7 @@ async function recipeFormView(id) {
     h("option", { value: "public", text: "Public: anyone can see it" }),
     h("option", { value: "family", disabled: !me.familyId, text: me.familyId ? "Family only" : "Family only (join a family first)" }),
   );
-  visibility.value = existing?.visibility || "public";
+  visibility.value = existing?.visibility || (defaults.visibility === "family" && me.familyId ? "family" : "public");
   const toLines = (el) => el.value.split("\n").map((s) => s.trim()).filter(Boolean);
 
   render(
@@ -446,7 +488,10 @@ async function recipeFormView(id) {
 
 async function familyView() {
   if (!me) return requireSignIn();
-  const { family } = await api("/families/mine");
+  const [{ family }, feed] = await Promise.all([
+    api("/families/mine"),
+    me.familyId ? api("/recipes") : Promise.resolve({ family: [] }),
+  ]);
 
   if (!family) {
     const name = h("input", { maxlength: 60, required: true, placeholder: "e.g. The Washingtons" });
@@ -467,8 +512,18 @@ async function familyView() {
 
   const isOwner = family.ownerId === me.userId;
   render(
-    h("h1", { text: family.name }),
-    isOwner ? h("div", { class: "card" },
+    h("div", { class: "page-head" },
+      h("div", {},
+        h("h1", { text: family.name }),
+        h("div", { class: "muted", text: `${family.members.length} ${family.members.length === 1 ? "member" : "members"}` })),
+      h("a", { class: "button", href: "#/new/family", text: "Share a family recipe" })),
+    recipeSection("Family recipes", `Only ${family.name} can see these`, feed.family,
+      h("div", { class: "empty" },
+        h("p", { text: "No family recipes yet." }),
+        h("a", { class: "button", href: "#/new/family", text: "Share the first one" }))),
+    h("h2", { text: `Members (${family.members.length})` }),
+    // Only the owner gets the invite code back from the API (inviteCode is null for everyone else).
+    isOwner ? h("div", { class: "card invite-code" },
       h("div", { class: "muted", text: "Share this invite code with family members:" }),
       h("div", { class: "row" },
         h("span", { class: "code", text: family.inviteCode }),
@@ -481,11 +536,11 @@ async function familyView() {
             route();
           },
         }))) : null,
-    h("h2", { text: `Members (${family.members.length})` }),
     h("div", { class: "card" }, family.members.map((member) => h("div", { class: "member" },
       h("div", {},
-        h("span", { class: "avatar", "aria-hidden": "true", text: member.displayName.charAt(0).toUpperCase() }),
+        avatar(member.displayName),
         member.displayName,
+        member.userId === me.userId ? [" ", h("span", { class: "badge", text: "You" })] : null,
         member.userId === family.ownerId ? [" ", h("span", { class: "badge", text: "Owner" })] : null),
       isOwner && member.userId !== me.userId ? h("button", {
         class: "danger",
@@ -961,7 +1016,7 @@ async function route() {
     else if (page === "confirm") confirmView();
     else if (page === "forgot") forgotView();
     else if (page === "recipe" && id) await recipeView(id);
-    else if (page === "new") await recipeFormView();
+    else if (page === "new") await recipeFormView(null, { visibility: id === "family" ? "family" : "public" });
     else if (page === "edit" && id) await recipeFormView(id);
     else if (page === "family") await familyView();
     else if (page === "profile") await profileView();

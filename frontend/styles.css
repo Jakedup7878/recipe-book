@@ -246,11 +246,73 @@ html[data-decorations="on"] .topbar button.secondary {
   border-color: color-mix(in srgb, var(--header-text) 60%, transparent);
 }
 
-html[data-decorations="on"] .topbar :is(button:not(.secondary), .button) {
+html[data-decorations="on"] .topbar :is(button:not(.secondary, .account-button, .menu-item), .button) {
   background: var(--header-text);
   color: var(--header-from);
   border-color: var(--header-text);
 }
+
+/* Account menu: avatar button in the top bar, dropdown card below it. */
+.account { position: relative; margin-left: 6px; }
+
+.account-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 4px;
+  background: transparent;
+  color: inherit;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+}
+.account-button:hover,
+.account-button[aria-expanded="true"],
+.account-button[data-current] { background: color-mix(in srgb, currentColor 14%, transparent); filter: none; }
+.account-button .avatar { width: 28px; height: 28px; margin: 0; font-size: 0.9rem; }
+.account-name { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.caret { font-size: 0.75rem; opacity: 0.8; }
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 10;
+  min-width: 230px;
+  padding: 6px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow), 0 10px 30px color-mix(in srgb, var(--text) 18%, transparent);
+}
+.menu-head { padding: 8px 10px 10px; overflow-wrap: anywhere; }
+.menu hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+nav .menu a, .menu .menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-weight: 500;
+}
+nav .menu a:hover, nav .menu a[aria-current="page"], .menu .menu-item:hover { background: var(--accent-soft); filter: none; }
+.menu .menu-item { color: var(--danger); }
+
+/* On phones the nav wraps under the brand, so drop the menu full-width under the header. */
+@media (max-width: 560px) {
+  .topbar { position: relative; }
+  .account { position: static; }
+  .menu { left: 16px; right: 16px; top: calc(100% - 4px); }
+  .account-name { display: none; }
+  .account-button { padding-right: 10px; }
+}
+
+/* Footer: only holds the Appearance link for signed-out visitors. */
+.site-footer { max-width: 1040px; margin: -48px auto 0; padding: 0 16px 32px; }
+.site-footer nav { justify-content: center; }
+.site-footer nav a { color: var(--muted); font-size: 0.92rem; }
 
 /* ==========================================================================
    Layout and components
@@ -427,6 +489,7 @@ html[data-decorations="off"] .auth-motif::before { content: "🍳"; }
 /* Family */
 .member { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .member:last-child { border-bottom: none; }
+.invite-code { margin-bottom: 12px; }
 .avatar {
   width: 34px; height: 34px; border-radius: 50%;
   display: inline-grid; place-items: center;
