@@ -2,6 +2,8 @@
 
 - help_level: HIGH (chosen by the user 2026-10-22)
 - AWS CLI profile: recipe-book; selected Region: us-east-2
+- Site domain: familyfoodiebook.com (registered outside AWS; DNS in Route 53 hosted zone Z02506442RXVZGAXGYTYE)
+- Site certificate (ACM, us-east-1, apex + www, DNS-validated): arn:aws:acm:us-east-1:202518310652:certificate/61403a14-1888-4de7-8f3e-5f5e4a6c6f22
 
 <!-- BEGIN AWS Agent Toolkit rules -->
 # AWS Guidance for the new AWS experience
