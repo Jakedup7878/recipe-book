@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "recipe-book-local",
+      "runtimeExecutable": "infra\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["backend\\local_dev.py"],
+      "port": 8001
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "app": ".venv\\Scripts\\python.exe app.py",
+  "watch": {
+    "include": ["**"],
+    "exclude": [".venv", "node_modules", "cdk.out", "**/__pycache__"]
+  },
+  "context": {}
+}

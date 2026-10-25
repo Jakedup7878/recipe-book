@@ -1,0 +1,13 @@
+# Local environments and build output
+.venv/
+node_modules/
+cdk.out/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Personal Claude Code settings (shared ones like launch.json are committed)
+.claude/settings.local.json
+
+# Local dev server data (accounts and recipes)
+backend/.localdata/

@@ -1,0 +1,6 @@
+-r recipe_api/requirements.txt
+boto3
+uvicorn==0.54.0
+httpx
+pytest==8.4.2
+moto[dynamodb]==5.1.14

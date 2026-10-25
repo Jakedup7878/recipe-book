@@ -1,0 +1,4 @@
+# Packaged into the Lambda function (boto3 is already in the Lambda runtime).
+fastapi==0.161.0
+mangum==0.22.0
+pydantic==2.14.1

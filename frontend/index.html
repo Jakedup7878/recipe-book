@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#7a3312">
+  <title>Recipe Book</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Not deferred: applies the saved season/dark mode before first paint. -->
+  <script src="theme.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">Recipe Book</a>
+    <nav id="nav"></nav>
+  </header>
+  <div id="notice" class="notice" role="status" hidden></div>
+  <main id="view"><p class="muted">Loading…</p></main>
+</body>
+</html>
