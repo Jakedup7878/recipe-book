@@ -581,7 +581,7 @@ async function profileView() {
         showNotice("Display name saved.");
       },
     }, h("label", {}, "Display name", name), h("div", {}, h("button", { type: "submit", text: "Save" }))),
-    h("p", {}, h("a", { href: "#/appearance", text: "Change how Recipe Book looks →" })),
+    h("p", {}, h("a", { href: "#/appearance", text: "Change how Family Foodie Book looks →" })),
   );
 }
 
@@ -859,7 +859,7 @@ function signInView() {
     h("label", { class: "switch" }, remember, "Keep me signed in on this device"),
     error,
     h("button", { type: "submit", text: "Sign in" }));
-  render(authPage("Welcome back", "Sign in to your Recipe Book account.", form,
+  render(authPage("Welcome back", "Sign in to your Family Foodie Book account.", form,
     h("p", { class: "auth-switch" }, "New here? ", h("a", { href: "#/signup", text: "Create an account" }))));
   email.focus();
 }
@@ -893,7 +893,7 @@ function signUpView() {
         if (result.UserConfirmed) {
           await signIn(email.value, pendingPassword, false);
           pendingPassword = null;
-          return afterSignIn(`Welcome to Recipe Book, ${me.displayName}!`);
+          return afterSignIn(`Welcome to Family Foodie Book, ${me.displayName}!`);
         }
         go("#/confirm");
       });
@@ -924,7 +924,7 @@ function confirmView() {
         if (!pendingPassword) return go("#/signin", "Email confirmed! Sign in to get started.");
         await signIn(pending.email, pendingPassword, false);
         pendingPassword = null;
-        afterSignIn(`Welcome to Recipe Book, ${me.displayName}!`);
+        afterSignIn(`Welcome to Family Foodie Book, ${me.displayName}!`);
       });
     },
   },

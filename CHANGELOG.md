@@ -2,6 +2,28 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-25 (later): Clickable recipe cards, "Family Foodie Book" name
+
+### What changed
+
+- **The whole recipe card is clickable** (`frontend/styles.css`), on Home and on the Family page. Before, only the title opened the recipe.
+  - This is done in CSS with a "stretched link": the title link's `::after` covers the card. Each card is still **one** link, named by the recipe title, so screen readers and the Tab key behave the same as before. A JavaScript click handler on the card would have made it clickable for the mouse only.
+  - Hovering anywhere on a card highlights its title in the accent color. When a card's link has keyboard focus, the focus outline goes around the whole card.
+  - Trade-off: you can't select a card's text with the mouse any more, because clicks go to the link. The full text is on the recipe page.
+- **The site is now called "Family Foodie Book"** (`frontend/index.html`, `frontend/app.js`), to match familyfoodiebook.com.
+  - It's in the top-left of the header and in the browser tab title.
+  - It's also in the text that used the old name: "Sign in to your … account", "Welcome to …, *name*!" after signing up, and "Change how … looks" on the profile page.
+  - Not renamed: code comments, the repository and folder names, and AWS resource names such as the `RecipeBook` stack and `recipe-book` pipeline. Renaming those would replace live resources for no visible benefit. Cognito's sign-up emails don't include the site name, so they needed no change.
+
+### Tests
+
+- Full suite: 31 passed.
+- Local dev server checks:
+  - Clicking an empty corner of a card opens that recipe.
+  - Every sampled point on a card lands on the one recipe link.
+  - Tab focus outlines the whole card.
+  - The new name fits on one line at 375px with no sideways scrolling.
+
 ## 2026-10-25: Simpler navigation, account menu, family recipes
 
 ### What changed
