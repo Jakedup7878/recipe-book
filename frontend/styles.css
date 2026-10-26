@@ -611,7 +611,7 @@ button.code:hover { border-style: solid; filter: none; }
   background: color-mix(in srgb, var(--header-from) 45%, rgb(0 0 0 / 0.35));
   backdrop-filter: blur(2px);
 }
-.site-dialog form { gap: 0; padding: 24px 24px 20px; }
+.site-dialog .dialog-body { padding: 24px 24px 20px; }
 .site-dialog .auth-motif { width: 48px; height: 48px; font-size: 1.4rem; }
 .site-dialog h2 { margin: 0 0 8px; font-size: 1.3rem; overflow-wrap: anywhere; }
 .site-dialog p { margin: 0 0 10px; color: var(--muted); }

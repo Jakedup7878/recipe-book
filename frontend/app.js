@@ -45,29 +45,37 @@ function showNotice(message) {
 // tone "danger" paints the confirm button red and starts focus on Cancel.
 function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel = "Cancel", tone = "primary" }) {
   return new Promise((resolve) => {
-    const cancel = h("button", { type: "submit", value: "cancel", class: "secondary", text: cancelLabel });
-    const ok = h("button", { type: "submit", value: "confirm", class: tone === "danger" ? "danger-solid" : null,
-                             text: confirmLabel });
+    // Every way out calls finish() directly. The dialog's own "close" event is only a backstop:
+    // browsers fire it later as a queued task, which can be delayed (e.g. in a background tab).
+    let done = false;
+    const finish = (confirmed) => {
+      if (done) return;
+      done = true;
+      if (dialog.open) dialog.close();
+      dialog.remove();
+      resolve(confirmed);
+    };
+    const cancel = h("button", { type: "button", class: "secondary", text: cancelLabel, onclick: () => finish(false) });
+    const ok = h("button", { type: "button", class: tone === "danger" ? "danger-solid" : null, text: confirmLabel,
+                             onclick: () => finish(true) });
     const dialog = h("dialog", { class: "site-dialog", "aria-labelledby": "site-dialog-title" },
-      h("form", { method: "dialog" },
+      h("div", { class: "dialog-body" },
         h("div", { class: "auth-motif", "aria-hidden": "true" }),
         h("h2", { id: "site-dialog-title", text: title }),
         [message].flat().map((paragraph) => h("p", { text: paragraph })),
         h("div", { class: "dialog-actions" }, cancel, ok)));
-    // A click on the dimmed backdrop lands on the <dialog> itself (the form fills its inside).
-    dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close("cancel"); });
-    // Browsers close a modal dialog on Escape, but some skip it (e.g. Chrome's limits on repeated
-    // close requests), so handle it here too.
+    // A click on the dimmed backdrop lands on the <dialog> itself (dialog-body fills its inside).
+    dialog.addEventListener("click", (event) => { if (event.target === dialog) finish(false); });
+    // Escape: browsers fire "cancel" (some skip it, e.g. Chrome's limits on repeated close
+    // requests), so the key is handled directly as well.
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); finish(false); });
     dialog.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        dialog.close("cancel");
+        finish(false);
       }
     });
-    dialog.addEventListener("close", () => {
-      resolve(dialog.returnValue === "confirm");
-      dialog.remove();
-    });
+    dialog.addEventListener("close", () => finish(false));
     document.body.append(dialog);
     dialog.showModal();
     (tone === "danger" ? cancel : ok).focus();
