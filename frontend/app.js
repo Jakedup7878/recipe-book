@@ -39,6 +39,41 @@ function showNotice(message) {
   notice.hidden = !message;
 }
 
+// The site's own replacement for window.confirm(), styled with the season theme.
+// A modal <dialog> keeps focus inside, makes the page behind it inert, and
+// closes with Escape. Resolves true only when the confirm button is pressed.
+// tone "danger" paints the confirm button red and starts focus on Cancel.
+function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel = "Cancel", tone = "primary" }) {
+  return new Promise((resolve) => {
+    const cancel = h("button", { type: "submit", value: "cancel", class: "secondary", text: cancelLabel });
+    const ok = h("button", { type: "submit", value: "confirm", class: tone === "danger" ? "danger-solid" : null,
+                             text: confirmLabel });
+    const dialog = h("dialog", { class: "site-dialog", "aria-labelledby": "site-dialog-title" },
+      h("form", { method: "dialog" },
+        h("div", { class: "auth-motif", "aria-hidden": "true" }),
+        h("h2", { id: "site-dialog-title", text: title }),
+        [message].flat().map((paragraph) => h("p", { text: paragraph })),
+        h("div", { class: "dialog-actions" }, cancel, ok)));
+    // A click on the dimmed backdrop lands on the <dialog> itself (the form fills its inside).
+    dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close("cancel"); });
+    // Browsers close a modal dialog on Escape, but some skip it (e.g. Chrome's limits on repeated
+    // close requests), so handle it here too.
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dialog.close("cancel");
+      }
+    });
+    dialog.addEventListener("close", () => {
+      resolve(dialog.returnValue === "confirm");
+      dialog.remove();
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    (tone === "danger" ? cancel : ok).focus();
+  });
+}
+
 // A message to show on the next page, e.g. "Password changed" after a redirect.
 let flashMessage = "";
 
@@ -413,7 +448,9 @@ function commentNode(recipe, comment) {
       class: "link",
       text: "Delete",
       onclick: async () => {
-        if (!confirm("Delete this comment?")) return;
+        if (!await confirmDialog({
+          title: "Delete this comment?", message: "This can't be undone.", confirmLabel: "Delete comment", tone: "danger",
+        })) return;
         await api(`/recipes/${recipe.recipeId}/comments/${comment.commentId}`, { method: "DELETE" });
         route();
       },
@@ -431,10 +468,16 @@ async function recipeView(id) {
 
   // Moves the recipe from its family to Public (the same as Edit > Who can see it > Public).
   const publish = async () => {
-    const where = familyName ? `${familyName}'s recipes` : "family recipes";
-    if (!confirm(`Publish "${recipe.title}" to everyone?\n\nAnyone, signed in or not, will be able to see it ` +
-                 `and comment. It moves from ${where} to Public recipes, where your family can still see it. ` +
-                 "You can make it family-only again with Edit.")) return;
+    const where = familyName || "your family";
+    if (!await confirmDialog({
+      title: `Publish "${recipe.title}" to everyone?`,
+      message: [
+        "Anyone, signed in or not, will be able to see it and comment.",
+        `It moves from ${where} to Public recipes, where your family can still see it. ` +
+        "You can make it family-only again with Edit.",
+      ],
+      confirmLabel: "Publish to public",
+    })) return;
     const { title, description, ingredients, steps } = recipe;
     await api(`/recipes/${id}`, { method: "PUT", body: { title, description, ingredients, steps, visibility: "public" } });
     go(`#/recipe/${id}`, "Published. Everyone can see this recipe now.");
@@ -468,7 +511,10 @@ async function recipeView(id) {
           class: "danger",
           text: "Delete",
           onclick: async () => {
-            if (!confirm("Delete this recipe and its comments?")) return;
+            if (!await confirmDialog({
+              title: `Delete "${recipe.title}"?`, message: "The recipe and all its comments are deleted. This can't be undone.",
+              confirmLabel: "Delete recipe", tone: "danger",
+            })) return;
             await api(`/recipes/${id}`, { method: "DELETE" });
             location.hash = "#/";
           },
@@ -683,7 +729,11 @@ async function familyDetailView(familyId) {
       h("button", {
         type: "button", class: "link", text: "Make a new code",
         onclick: async () => {
-          if (!confirm("The old code and link will stop working. Continue?")) return;
+          if (!await confirmDialog({
+            title: "Make a new invite code?",
+            message: "The old code and invite link stop working. People already in the family stay in it.",
+            confirmLabel: "Make a new code",
+          })) return;
           const updated = await api(`/families/${familyId}/invite-code`, { method: "POST" });
           const copied = await copyText(updated.inviteCode);
           go(location.hash, copied ? "New code made and copied. The old code and link no longer work."
@@ -698,7 +748,11 @@ async function familyDetailView(familyId) {
     const consequence = !next
       ? "You're the last member, so the family and its invite code will be deleted."
       : isOwner ? `${next.displayName} will become the owner.` : "";
-    if (!confirm(`Leave ${family.name}? Its family-only recipes will no longer be visible to you. ${consequence}`)) return;
+    if (!await confirmDialog({
+      title: `Leave ${family.name}?`,
+      message: ["Its family-only recipes will no longer be visible to you.", consequence].filter(Boolean),
+      confirmLabel: "Leave family", tone: "danger",
+    })) return;
     await api(`/families/${familyId}/leave`, { method: "POST" });
     await loadMe();
     go("#/family", `You left ${family.name}.`);
@@ -726,7 +780,11 @@ async function familyDetailView(familyId) {
         class: "danger",
         text: "Remove",
         onclick: async () => {
-          if (!confirm(`Remove ${member.displayName} from ${family.name}?`)) return;
+          if (!await confirmDialog({
+            title: `Remove ${member.displayName} from ${family.name}?`,
+            message: "They'll stop seeing this family's recipes. You can invite them back with the invite link.",
+            confirmLabel: "Remove", tone: "danger",
+          })) return;
           await api(`/families/${familyId}/members/${member.userId}`, { method: "DELETE" });
           route();
         },

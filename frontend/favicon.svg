@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Family Foodie Book: an open recipe book with an autumn leaf, in the fall header colors.
+       favicon.ico and apple-touch-icon.png are rasterized from these same shapes. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7a3312"/>
+      <stop offset="1" stop-color="#c26a24"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <polygon points="9,24 30.5,27 30.5,52 9,49" fill="#fff6ea"/>
+  <polygon points="55,24 33.5,27 33.5,52 55,49" fill="#fff6ea"/>
+  <ellipse cx="32" cy="14.5" rx="5" ry="9" transform="rotate(38 32 14.5)" fill="#f4b942"/>
+</svg>

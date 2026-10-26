@@ -41,6 +41,16 @@ def test_frontend_api_calls_have_gateway_routes():
     assert not missing
 
 
+def test_index_html_references_files_that_exist():
+    # A missing file isn't a 404 on the live site: private S3 behind CloudFront answers 403.
+    with open(os.path.join(FRONTEND, "index.html"), encoding="utf-8") as f:
+        refs = re.findall(r'(?:href|src)="([^"#:]+)"', f.read())
+    assert {"favicon.ico", "favicon.svg", "apple-touch-icon.png", "styles.css", "app.js", "theme.js"} <= set(refs)
+    assert [r for r in refs if not os.path.isfile(os.path.join(FRONTEND, r))] == []
+    # Browsers also fetch /favicon.ico on their own, whatever the page links.
+    assert os.path.isfile(os.path.join(FRONTEND, "favicon.ico"))
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="Node.js isn't installed")
 @pytest.mark.parametrize("script", ["app.js", "theme.js"])
 def test_frontend_scripts_parse(script):

@@ -2,6 +2,35 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-25 (night): Site-styled confirmations, favicon
+
+### What changed
+
+- **The site's own confirmation dialog replaces the browser's pop-up** (`confirmDialog()` in `frontend/app.js`, styles under "Confirm dialog" in `frontend/styles.css`).
+  - All six confirmations use it: publishing a family recipe, deleting a recipe, deleting a comment, making a new invite code, leaving a family, and removing a member.
+  - Each has a clear title, a short explanation, and a button that names the action ("Publish to public", "Delete recipe", "Leave family"…) instead of a generic OK.
+  - The dialog follows the season theme and dark mode: the season icon at the top, the page behind dimmed in the header color and slightly blurred, and a short fade-in that's skipped for people who turn on "reduce motion".
+  - **Destructive actions** (delete, leave, remove) get a red button, and the focus starts on **Cancel**, so pressing Enter by accident doesn't delete anything. For non-destructive actions, the focus starts on the action button.
+  - It's built on the HTML `<dialog>` element opened with `showModal()`. Keyboard focus stays inside it, the page behind can't be clicked, and screen readers announce it by its title.
+  - **Escape**, clicking outside the dialog, and **Cancel** all dismiss it. Escape is also handled in code, because Chrome sometimes skips its built-in Escape-to-close for dialogs.
+  - Small wording fix: the publish message now says "It moves from The Washingtons to Public recipes" instead of "The Washingtons's recipes".
+- **Favicon: fixes the `403 /favicon.ico` console error.**
+  - Browsers request `/favicon.ico` on their own. The site had none, and the private S3 bucket behind CloudFront answers a missing file with **403** (it can't reveal whether the file exists), not 404.
+  - The site now has an icon of an open cream recipe book with an autumn leaf, on the header's rust gradient. It comes in three files:
+    - `frontend/favicon.svg`: the source design, used by modern browsers;
+    - `frontend/favicon.ico`: 16, 32 and 48 px, for the automatic `/favicon.ico` request and older browsers;
+    - `frontend/apple-touch-icon.png`: 180 px, for iPhone and iPad home screens.
+  - `index.html` links all three. The `.ico` and `.png` were rasterized from the SVG's shapes, so they match it.
+
+### Tests
+
+- New `test_index_html_references_files_that_exist` (`backend/tests/test_frontend.py`): every file `index.html` links must exist in `frontend/`, and `favicon.ico` must exist. On the live site, a missing file shows up as a 403.
+- Full suite: 38 passed.
+- Manual checks on the local dev server:
+  - The publish dialog: Escape, an outside click and Cancel all leave the recipe unchanged; Enter on the focused button publishes it. The sample recipe was then restored to family-only.
+  - The delete dialog at 375 px in light mode: a red button, focus on Cancel, and it fits the screen.
+  - All three icons are served (200) with the right content types, and there are no console errors.
+
 ## 2026-10-25 (evening): Multiple families, invite links, renaming, publishing
 
 ### What changed for people using the site

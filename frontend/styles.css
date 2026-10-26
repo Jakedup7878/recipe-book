@@ -593,6 +593,34 @@ button.code:hover { border-style: solid; filter: none; }
 .switch { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
 .switch input { width: 20px; height: 20px; accent-color: var(--accent); }
 
+/* ==========================================================================
+   Confirm dialog (confirmDialog() in app.js, replaces the browser's confirm box)
+   ========================================================================== */
+
+.site-dialog {
+  width: min(440px, calc(100% - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow), 0 24px 60px color-mix(in srgb, #000 35%, transparent);
+  animation: dialog-in 0.16s ease-out;
+}
+.site-dialog::backdrop {
+  background: color-mix(in srgb, var(--header-from) 45%, rgb(0 0 0 / 0.35));
+  backdrop-filter: blur(2px);
+}
+.site-dialog form { gap: 0; padding: 24px 24px 20px; }
+.site-dialog .auth-motif { width: 48px; height: 48px; font-size: 1.4rem; }
+.site-dialog h2 { margin: 0 0 8px; font-size: 1.3rem; overflow-wrap: anywhere; }
+.site-dialog p { margin: 0 0 10px; color: var(--muted); }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+button.danger-solid { background: var(--danger); border-color: var(--danger); color: var(--surface); }
+@media (max-width: 420px) { .dialog-actions button { flex: 1 1 auto; } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
+  .site-dialog { animation: none; }
 }
