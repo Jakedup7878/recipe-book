@@ -11,12 +11,12 @@ For the big picture, read [architecture.md](architecture.md) first.
 These files are uploaded to S3 exactly as they are and served by CloudFront. There's no build step, so what's in the folder is what's in production.
 
 ### `frontend/index.html`
-**What:** The only HTML page. It has a header (the brand link and an empty `<nav id="nav">`), a notice bar, an empty `<main id="view">` that the app fills in, and a footer nav. It links the favicon files, `styles.css` and the two scripts.
+**What:** The app's page. It has a header (the brand link and an empty `<nav id="nav">`), a notice bar, an empty `<main id="view">` that the app fills in, and a footer nav with the Privacy Policy and Terms of Service links. It links the favicon files, `styles.css` and the two scripts.
 
 **Why:**
 - **One page with hash routing** means S3 and CloudFront never need rewrite rules, and any `#/…` link can be bookmarked.
 - **`theme.js` loads without `defer`** in `<head>` on purpose: it applies your saved season and dark mode *before the first paint*, so there's no flash of the wrong colors. `app.js` is deferred so it runs after the page is parsed.
-- **The nav and footer are empty containers** because what's in them depends on whether you're signed in. `app.js` fills them.
+- **The nav is an empty container** because what's in it depends on whether you're signed in, and `app.js` fills it. The footer is the same except for the two **policy links, which are plain HTML**, so they're there before the script runs. The `#footer-links` span (`display: contents` in the CSS) holds the one dynamic link, Appearance, for signed-out visitors.
 - **The three icon links** (`favicon.ico`, `favicon.svg`, `apple-touch-icon.png`) cover old browsers, modern browsers and iPhone home screens. The `.ico` also answers the request every browser makes to `/favicon.ico` on its own. Without it, the private S3 bucket answered 403.
 - **`<meta name="theme-color">`** colors the phone browser's toolbar. `theme.js` updates it to match the season.
 
@@ -43,6 +43,7 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **Invite links** are `#/join/<code>`. Signed-out visitors go to sign-in first and come back afterwards (`returnTo` in `sessionStorage`). The join form also accepts a pasted link.
 - **Copy to clipboard** tries the Clipboard API, then falls back to copying from a hidden text field. Some in-app browsers block the Clipboard API.
 - **The location feature** only ever stores `north` or `south`. It re-checks quietly when the app opens, and the permission prompt appears only when you turn it on.
+- **Sign-up agreement checkboxes**: two required boxes, "I'm 13 or older and agree to the Terms of Service" and "I've read the Privacy Policy". They're separate because the Terms are an agreement and the Privacy Policy is a notice. `required` makes the browser stop the form. The submit handler checks again with the site's own error message, before calling Cognito. `policyLink()` opens each document in a new tab, so the half-filled form isn't lost, and adds "(opens in a new tab)" for screen readers.
 
 ### `frontend/theme.js`
 **What:** The seasonal theme engine, exposed as `window.RecipeTheme`. It reads and saves appearance preferences (in `localStorage`, and in the account when signed in), works out "auto" season from the date and hemisphere, applies `data-season`, `data-mode`, `data-font`, `data-text-size` and `data-decorations` to `<html>`, handles the location-to-hemisphere lookup, and fixes custom accent colors for contrast.
@@ -61,7 +62,8 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - base typography;
 - the **header, account menu and footer**;
 - shared components: cards, badges, buttons, forms, notices;
-- the recipe, family, auth and appearance pages;
+- the recipe, family, auth and appearance pages, including the sign-up agreement checkboxes;
+- the **Privacy Policy and Terms of Service** pages (`.legal`);
 - the **confirm dialog**;
 - reduced-motion rules.
 
@@ -77,6 +79,25 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 **What:** The site icon, an open cream recipe book with an autumn leaf on the header's rust gradient, in three formats.
 
 **Why:** Modern browsers use the SVG, which stays sharp at any size. Browsers request `/favicon.ico` on their own, and older ones only understand `.ico`, which holds 16, 32 and 48 px images. iOS uses the 180 px PNG for home-screen icons. The `.ico` and `.png` were rasterized from the same shapes as the SVG so all three match.
+
+### `frontend/privacy.html`, `frontend/terms.html`
+**What:** The Privacy Policy and Terms of Service, served at `/privacy.html` and `/terms.html`. Each starts with a plain-language "short version", then a contents list and numbered sections, and the footer links both. Contact: `support@familyfoodiebook.com`. Minimum age: 13, with a parent's permission under 18. There's no governing-law clause yet, by the owner's choice.
+
+**Why:**
+- **Standalone pages, not `#/` routes.** They have stable URLs that search engines, app stores and payment providers (Stripe, for example) can read. They work without JavaScript. Opening them in a new tab from sign-up leaves the form alone. They load `styles.css` and `theme.js` (but not `app.js`), so they still follow the visitor's season and dark mode.
+- **Written from what the code actually does**, not a generic template:
+  - passwords go only to Cognito (`USER_PASSWORD_AUTH`), never to the API;
+  - request logs (IP address, route, status, latency) are kept 30 days;
+  - for signed-out visitors, rate-limit counters are kept per IP address, with a 2-minute TTL;
+  - there are no cookies, analytics or ads;
+  - only `north`/`south` is kept from location;
+  - email addresses are never shown to other members;
+  - family recipes stay with the family when their author leaves;
+  - deleting a recipe deletes its comments.
+
+  **When one of those changes, update the pages and their "Effective" date**; for example, adding photos, SES email, account deletion or payments.
+- **Account deletion is by email** for now, because there's no self-service option yet. The Privacy Policy promises an answer within 30 days, and that's a manual job until the "delete my account" feature in [plans/monetization.md](plans/monetization.md) is built.
+- **No inline styles or scripts** (the CSP blocks them), which `test_frontend.py` checks.
 
 ---
 
@@ -192,10 +213,15 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 ### `backend/tests/test_frontend.py`
 **What:**
 - Every `api("…")` call in `app.js` must match a gateway route and method.
-- `index.html` may only link files that exist, and `favicon.ico` must exist.
+- `index.html`, `privacy.html` and `terms.html` may only link files that exist, and `favicon.ico` must exist.
+- No page has inline scripts, styles or event handlers, which the CSP would block.
+- Every page's footer links both policies.
+- Every `#anchor` link in the policies, including cross-links such as `terms.html#who-can-use`, points at a heading that exists.
+- Each policy page has an "Effective" date and the support email address.
+- The sign-up form has both required checkboxes, and checks them before calling Cognito.
 - `app.js` and `theme.js` must parse (`node --check`).
 
-**Why:** The frontend has no build step, so nothing else would catch a typo in an API path or a JavaScript syntax error before deploy. A missing file shows up on the live site as a 403, not a 404, which is confusing to diagnose.
+**Why:** The frontend has no build step, so nothing else would catch a typo in an API path or a JavaScript syntax error before deploy. A missing file shows up on the live site as a 403, not a 404, which is confusing to diagnose. Inline code works on the local server, which sends no CSP, but is blocked live, so it's checked here.
 
 ### `backend/tests/test_local_dev.py`
 **What:** Tests the local dev server:

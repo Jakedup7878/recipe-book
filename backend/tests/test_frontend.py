@@ -1,5 +1,6 @@
 """Checks on the plain-JS frontend that don't need a browser: every API path
-app.js calls is a route API Gateway forwards, and the scripts parse."""
+app.js calls is a route API Gateway forwards, the scripts parse, and the HTML
+pages link files and anchors that exist and keep to the site's CSP."""
 
 import os
 import re
@@ -41,14 +42,72 @@ def test_frontend_api_calls_have_gateway_routes():
     assert not missing
 
 
-def test_index_html_references_files_that_exist():
+PAGES = ["index.html", "privacy.html", "terms.html"]
+POLICY_PAGES = ["privacy.html", "terms.html"]
+
+
+def read(name):
+    with open(os.path.join(FRONTEND, name), encoding="utf-8") as f:
+        return f.read()
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_pages_reference_files_that_exist(page):
     # A missing file isn't a 404 on the live site: private S3 behind CloudFront answers 403.
-    with open(os.path.join(FRONTEND, "index.html"), encoding="utf-8") as f:
-        refs = re.findall(r'(?:href|src)="([^"#:]+)"', f.read())
-    assert {"favicon.ico", "favicon.svg", "apple-touch-icon.png", "styles.css", "app.js", "theme.js"} <= set(refs)
+    # Local paths only (no mailto: or https:), without any #anchor; "/" is the home page.
+    refs = {ref.lstrip("/") for ref in re.findall(r'(?:href|src)="(?![a-z]+:)([^"#]*)', read(page))} - {""}
+    assert {"favicon.ico", "favicon.svg", "apple-touch-icon.png", "styles.css", "theme.js"} <= refs
+    if page == "index.html":
+        assert {"app.js", "privacy.html", "terms.html"} <= refs
     assert [r for r in refs if not os.path.isfile(os.path.join(FRONTEND, r))] == []
     # Browsers also fetch /favicon.ico on their own, whatever the page links.
     assert os.path.isfile(os.path.join(FRONTEND, "favicon.ico"))
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_pages_keep_to_the_content_security_policy(page):
+    # The CSP (infra/recipe_stack.py) allows only same-origin scripts and styles:
+    # inline ones would be blocked on the live site but still work locally.
+    html = read(page)
+    assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html), "inline <script>"
+    assert "<style" not in html
+    assert not re.search(r'\sstyle="', html), "inline style attribute"
+    assert not re.search(r'\son[a-z]+="', html), "inline event handler"
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_every_page_links_both_policies_in_the_footer(page):
+    footer = re.search(r'<footer class="site-footer">(.*?)</footer>', read(page), re.S).group(1)
+    assert 'href="privacy.html"' in footer
+    assert 'href="terms.html"' in footer
+
+
+@pytest.mark.parametrize("page", POLICY_PAGES)
+def test_policy_anchor_links_point_at_headings_that_exist(page):
+    # Covers the contents lists and the cross-links such as terms.html#who-can-use.
+    html = read(page)
+    links = re.findall(r'href="([a-z]*\.html)?#([\w-]+)"', html)
+    assert len(links) > 10
+    ids = {name: set(re.findall(r'\sid="([\w-]+)"', read(name))) for name in POLICY_PAGES}
+    missing = [f"{target}#{anchor}" for target, anchor in links if anchor not in ids[target or page]]
+    assert missing == []
+
+
+@pytest.mark.parametrize("page", POLICY_PAGES)
+def test_policy_pages_have_a_date_and_a_contact(page):
+    html = read(page)
+    assert re.search(r"Effective \w+ \d{1,2}, \d{4}", html)
+    assert 'href="mailto:support@familyfoodiebook.com"' in html
+
+
+def test_sign_up_requires_agreeing_to_both_policies():
+    source = read("app.js")
+    sign_up = source[source.index("function signUpView()"):source.index("function confirmView()")]
+    assert sign_up.count('h("input", { type: "checkbox", required: true })') == 2
+    assert 'policyLink("terms.html", "Terms of Service")' in sign_up
+    assert 'policyLink("privacy.html", "Privacy Policy")' in sign_up
+    # The handler also refuses to call Cognito until both are ticked.
+    assert sign_up.index("!terms.checked || !privacy.checked") < sign_up.index('cognito("SignUp"')
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="Node.js isn't installed")

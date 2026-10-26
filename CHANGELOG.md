@@ -2,6 +2,62 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-26: Privacy Policy, Terms of Service, sign-up agreement
+
+### What changed
+
+- **New Privacy Policy** (`frontend/privacy.html`, at `/privacy.html`). It's written from what the site actually does:
+  - What's collected: email, display name, recipes, comments, families and appearance settings.
+  - Passwords go only to Amazon Cognito; the site never receives or stores them.
+  - Location, if you turn it on, is reduced in the browser to "north" or "south".
+  - Request logs (with IP addresses) are kept 30 days. For signed-out visitors, short-lived rate-limit counters are kept per IP address.
+  - No cookies, analytics, ads or tracking, and data is never sold.
+  - Who can see public and family recipes and comments; email addresses are never shown.
+  - AWS hosts everything, in the United States.
+  - Retention, and the reader's rights. Copies of data, corrections and account deletion are by email to `support@familyfoodiebook.com`, answered within 30 days.
+  - Legal bases for EU and UK visitors, children (13+), and security.
+- **New Terms of Service** (`frontend/terms.html`, at `/terms.html`):
+  - Age: 13 or older, with a parent's or guardian's permission under 18.
+  - Account rules.
+  - You keep ownership of your recipes. You grant a license to host and show them, limited to the visibility you choose.
+  - How families work: invite codes, the owner, leaving, publishing.
+  - Community rules.
+  - A **food-safety and allergy notice**.
+  - Moderation, and a copyright-complaint process.
+  - "As is" disclaimers, a limit on liability, changes, and contact.
+  - No governing-law clause for now.
+- Both open with a plain-language **"short version"** and a linked contents list, and follow the season theme and dark mode. They're plain HTML pages, not `#/` routes, so they have stable URLs and work without JavaScript.
+- **Footer links** to both on every page, signed in or out. They're plain HTML, so they show before the app loads. Signed-out visitors also still see Appearance there.
+- **Sign-up now has two required checkboxes**, under "Before you join":
+  - "I'm 13 or older and agree to the Terms of Service";
+  - "I've read the Privacy Policy".
+
+  Each link opens in a new tab, so the form isn't lost. The browser blocks the form until both are ticked, and the site checks again before contacting Cognito, using its own error message.
+
+### Tests
+
+- `backend/tests/test_frontend.py`:
+  - all three pages link only files that exist;
+  - no page has inline scripts, styles or event handlers, which the CSP blocks;
+  - every footer links both policies;
+  - every `#anchor` in the policies points at a real heading, including links between the two pages;
+  - both have an "Effective" date and the support address;
+  - sign-up has both required checkboxes and checks them before calling Cognito.
+- Full suite: 51 passed.
+- Manual checks on the local dev server:
+  - Submitting without the boxes ticked stops at the browser's check.
+  - With `required` removed, the site's own error message appears and no account is created.
+  - With both ticked, sign-up continues to "Check your email".
+  - Clicking a policy link doesn't tick its box; clicking the label text does.
+  - Both pages checked in dark mode at desktop width, and in light mode at 375 px with no sideways scrolling.
+  - Signed in, the footer shows only the two policy links.
+  - No console errors.
+
+### Before relying on these
+
+- **`support@familyfoodiebook.com` doesn't receive mail yet.** Set up forwarding (or SES receiving) before deploying, because both documents send privacy and deletion requests there.
+- These were written for this site, but they're not legal advice. Have them reviewed, especially before adding payments.
+
 ## 2026-10-25 (night): Site-styled confirmations, favicon
 
 ### What changed

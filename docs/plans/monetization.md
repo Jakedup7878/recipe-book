@@ -103,7 +103,11 @@ The project is on the **AWS Free plan**, with credits and an end date (currently
 
 ## 5. Business and legal basics (before taking money)
 
-- A **Terms of Service** and a **Privacy Policy** on the site, linked in the footer. Say what's stored (email, recipes, photos), who processes it (AWS, Stripe), how to delete an account, and the refund policy.
+- A **Terms of Service** and a **Privacy Policy** on the site, linked in the footer. **Done (2026-10-26):** `frontend/terms.html` and `frontend/privacy.html`, with agreement checkboxes on sign-up. Before taking money, update them:
+  - add Stripe as a processor, and photos if they're built;
+  - add billing, renewal and refund terms;
+  - consider a governing-law clause;
+  - have a lawyer review them.
 - **Account deletion**: a "delete my account" option that removes the profile, recipes, photos and memberships, and deletes the Cognito user. This is needed for privacy laws and app stores.
 - **Affiliate disclosure** next to any affiliate link (US FTC rules).
 - **Business setup**: a business entity and bank account; tax registration where required. Talk to an accountant.
@@ -113,7 +117,7 @@ The project is on the **AWS Free plan**, with credits and an end date (currently
 
 | Phase | What | Needs |
 |---|---|---|
-| 0. Foundations | SES set up and out of the sandbox; Terms and Privacy pages; account deletion; Budgets and alarms; upgrade to the Paid plan | [email-with-ses.md](email-with-ses.md) |
+| 0. Foundations | SES set up and out of the sandbox; ~~Terms and Privacy pages~~ (done); account deletion; Budgets and alarms; upgrade to the Paid plan | [email-with-ses.md](email-with-ses.md) |
 | 1. Make it worth paying for | Recipe photos; the weekly world-meal plan | [recipe-photos.md](recipe-photos.md), [world-meal-of-the-week.md](world-meal-of-the-week.md) |
 | 2. Family Plus | Stripe Checkout and Portal, EventBridge events, entitlements, PDF cookbook, trial emails | Secrets Manager, EventBridge, SES |
 | 3. Printed cookbooks | The PDF builder at print quality, the print partner, order tracking | S3, SQS, Stripe one-off payments |

@@ -21,6 +21,13 @@
   </header>
   <div id="notice" class="notice" role="status" hidden></div>
   <main id="view"><p class="muted">Loading…</p></main>
-  <footer class="site-footer"><nav id="footer-links" aria-label="More"></nav></footer>
+  <footer class="site-footer">
+    <!-- app.js fills #footer-links; the policy links are static so they show before it loads. -->
+    <nav aria-label="More">
+      <span id="footer-links"></span>
+      <a href="privacy.html">Privacy Policy</a>
+      <a href="terms.html">Terms of Service</a>
+    </nav>
+  </footer>
 </body>
 </html>

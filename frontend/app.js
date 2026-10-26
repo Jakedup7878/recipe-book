@@ -290,7 +290,8 @@ async function loadMe() {
 
 // The top bar is Home, Family and an account menu holding profile, appearance
 // and sign out. Signed out, it's Home plus the sign-in links; appearance is in
-// the footer so the look can still be changed without an account.
+// the footer (beside the static policy links) so the look can still be changed
+// without an account.
 function renderNav() {
   const page = (location.hash || "#/").split("/")[1] || "";
   const link = (href, label, key) =>
@@ -1123,16 +1124,29 @@ function signInView() {
   email.focus();
 }
 
+// Opens in a new tab so the half-filled sign-up form isn't lost.
+function policyLink(href, label) {
+  return h("a", { href, target: "_blank", rel: "noopener" }, label,
+    h("span", { class: "visually-hidden", text: " (opens in a new tab)" }));
+}
+
 function signUpView() {
   if (me) return go("#/");
   const name = h("input", { autocomplete: "name", required: true, maxlength: 40, placeholder: "e.g. Grandma Rose" });
   const email = emailInput();
   const password = passwordInput("new-password");
+  // Both are required, so the browser stops the form until they're ticked; the
+  // check in the handler is a backstop with the site's own error message.
+  const terms = h("input", { type: "checkbox", required: true });
+  const privacy = h("input", { type: "checkbox", required: true });
   const error = errorBox();
   const form = h("form", {
     onsubmit: (event) => {
       event.preventDefault();
       submitting(form, error, async () => {
+        if (!terms.checked || !privacy.checked) {
+          throw new Error("Please agree to the Terms of Service and confirm you've read the Privacy Policy.");
+        }
         const failed = PASSWORD_RULES.filter(([rule]) => !rule.test(password.input.value));
         if (failed.length) throw new Error(`Your password needs: ${failed.map(([, t]) => t.toLowerCase()).join(", ")}.`);
         const result = await cognito("SignUp", {
@@ -1162,6 +1176,12 @@ function signUpView() {
     h("label", {}, "Email", email),
     h("label", {}, "Password", password.field),
     passwordRules(password.input),
+    h("fieldset", { class: "agreements" },
+      h("legend", { text: "Before you join" }),
+      h("label", { class: "agreement" }, terms,
+        h("span", {}, "I'm 13 or older and agree to the ", policyLink("terms.html", "Terms of Service"), ".")),
+      h("label", { class: "agreement" }, privacy,
+        h("span", {}, "I've read the ", policyLink("privacy.html", "Privacy Policy"), "."))),
     error,
     h("button", { type: "submit", text: "Create account" }));
   render(authPage("Create your account", "Save recipes, comment, and share with your family.", form,
