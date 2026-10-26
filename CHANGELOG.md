@@ -2,6 +2,44 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-26 (later): support@ receives mail
+
+### What changed
+
+- **`support@familyfoodiebook.com` now receives mail.** The Privacy Policy and Terms send privacy, deletion, abuse and copyright requests there. Amazon SES receives it in us-east-2, keeps the raw message in a private S3 bucket, and a small Lambda (`backend/mail_forwarder/forwarder.py`) forwards it to the owner's inbox.
+  - The copy comes from `"<sender> via Family Foodie Book" <support@familyfoodiebook.com>`, with Reply-To set to the sender, so Reply in the inbox answers them (from the inbox's own address).
+  - Mail SES marks as a virus or spam, or that fails its sender's DMARC `reject` policy, is kept in the bucket but not forwarded.
+  - Only `support@` and `dmarc-reports@` have receipt rules; SES rejects mail for any other address.
+  - The forwarding address is in Parameter Store (`/recipe-book/support-forward-to`), not in Git or the CloudFormation template. The forwarder reads it for each message, so changing it needs no deploy.
+- **New DNS records**, all from the stack (`_support_mail()` in `infra/recipe_stack.py`). No existing record changes:
+  - MX → `inbound-smtp.us-east-2.amazonaws.com`;
+  - SPF `v=spf1 include:amazonses.com ~all`;
+  - DMARC `p=none`, with reports to `dmarc-reports@` (stored in the bucket, not forwarded);
+  - three Easy DKIM CNAMEs;
+  - MX and SPF for the MAIL FROM subdomain `mail.familyfoodiebook.com`.
+- That's also **step 1 of [docs/plans/email-with-ses.md](docs/plans/email-with-ses.md)** (domain identity, DKIM, MAIL FROM, DMARC), so moving Cognito's emails to SES later needs no more DNS work.
+- The **mail bucket is RETAINed** like the table and user pool, because it holds real correspondence. Messages expire after 365 days.
+- CloudFormation can't activate a receipt rule set, so a CDK custom resource calls `SetActiveReceiptRuleSet`, and deactivates it if the stack is removed.
+- Turned on by `supportForwardToParameter` in `cdk.json` → `context.domain`. Without it, none of this is created.
+- Hosted zone import switched to `PublicHostedZone.from_public_hosted_zone_attributes` so SES can add its DKIM records. It's a reference only; `cdk diff` shows no change to the existing records.
+- **Docs:** [docs/operations.md §7](docs/operations.md#7-support-email-supportfamilyfoodiebookcom) (how it works, records, setup, testing, replying, cost), with the later sections renumbered; plus `files.md`, `architecture.md` (decision 16, costs) and the SES plan's status.
+
+### Set up by hand (outside the stack, because they hold a personal address)
+
+- The Parameter Store `String` `/recipe-book/support-forward-to`.
+- An SES identity for the inbox address: SES is still in the **sandbox**, where it only sends to verified addresses. AWS emails that inbox a verification link to click.
+
+### Tests
+
+- New `backend/tests/test_mail_forwarder.py` (11 tests): header rewriting (decoded names, existing Reply-To, signature headers removed, body unchanged), the virus/spam/DMARC filter, and the handler's S3 read and SES send.
+- `infra/tests/test_recipe_stack.py` (4 new tests): the mail records next to the unchanged site records; the rules (support@ stored then forwarded, dmarc-reports@ stored only) and their activation; the retained bucket and expiry; the forwarder reads only its one parameter, and no address other than the domain's own is in the template; nothing is created without the setting.
+- Full suite: 66 passed. `cdk diff` against the live stack: 24 resources added, nothing modified or replaced.
+
+### Not yet
+
+- **Replying as support@** needs SES production access and a sending path; until then, replies come from the inbox's own address.
+- After a few weeks of clean DMARC reports, move DMARC from `p=none` to `p=quarantine`.
+
 ## 2026-10-26: Privacy Policy, Terms of Service, sign-up agreement
 
 ### What changed

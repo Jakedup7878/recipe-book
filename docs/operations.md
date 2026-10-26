@@ -41,7 +41,7 @@ infra\.venv\Scripts\python.exe backend\local_dev.py
 infra\.venv\Scripts\python.exe -m pytest backend/tests infra/tests -q
 ```
 
-There are 38 tests: API behavior, route parity between the gateway and FastAPI, frontend checks, the local dev server, and both CDK stacks. The pipeline runs the same command; Node.js must be installed or the two JavaScript syntax checks are skipped.
+There are 66 tests: API behavior, route parity between the gateway and FastAPI, frontend checks, the local dev server, the support@ mail forwarder, and both CDK stacks. The pipeline runs the same command; Node.js must be installed or the two JavaScript syntax checks are skipped.
 
 ## 4. Deploy (the normal way: through the pipeline)
 
@@ -62,7 +62,7 @@ There are 38 tests: API behavior, route parity between the gateway and FastAPI, 
 2. **Pipeline stack**: in `infra/cdk.json`, set `context.github` (owner, repo, branch), then run `npx cdk deploy RecipeBookPipeline --profile recipe-book`.
 3. **Approve the GitHub connection** in the console: Developer Tools → Settings → Connections → `recipe-book-github` → *Update pending connection*. It stays **Pending** until a person does this; no API can.
 4. **Push to `main`**, or start the pipeline from the console, then review and approve. The first deploy creates the whole app.
-5. **Optional custom domain**: see §6.
+5. **Optional custom domain**: see §6. **Optional support email** (needs the domain): see §7.
 
 ## 6. Custom domain (how familyfoodiebook.com was set up)
 
@@ -73,7 +73,57 @@ There are 38 tests: API behavior, route parity between the gateway and FastAPI, 
 5. **Put the settings in `infra/cdk.json`** under `context.domain`: `name`, `certificateArn`, `hostedZoneId`. Commit, push, and approve the deploy.
 6. CloudFront now serves both names. The CloudFront Function redirects `www.` and `*.cloudfront.net` to the main domain, and CORS allows only that domain.
 
-## 7. Monitoring and checking
+## 7. Support email (support@familyfoodiebook.com)
+
+The Privacy Policy and Terms send privacy, deletion, abuse and copyright requests to `support@familyfoodiebook.com`. Amazon SES receives that mail in us-east-2 and a small Lambda forwards it to the owner's inbox. Everything except the destination address is in `infra/recipe_stack.py` (`_support_mail`), turned on by `supportForwardToParameter` in `cdk.json` → `context.domain`.
+
+**How a message travels:**
+1. The sender's server looks up the domain's **MX** record and delivers to `inbound-smtp.us-east-2.amazonaws.com`.
+2. SES checks the active receipt rule set (`MailRules`). Only two addresses have rules; mail for any other address is rejected.
+   - `support@` → stored in the mail bucket under `support/`, then the **`MailForwarder`** Lambda runs.
+   - `dmarc-reports@` → stored under `dmarc-reports/` only (daily DMARC reports from Google, Microsoft and others; not forwarded).
+3. The forwarder skips anything SES marks as a virus or spam, or that fails the sender's own DMARC `reject` policy. Those stay in the bucket.
+4. It sends a copy **from** `"<sender> via Family Foodie Book" <support@familyfoodiebook.com>` with **Reply-To** set to the original sender, to the address in Parameter Store `/recipe-book/support-forward-to`.
+5. Pressing **Reply** in the inbox answers the sender directly, **from the inbox's own address** (not from support@). See "Replying as support@" below.
+
+**DNS records** (all created by the stack; none of the existing records change):
+
+| Name | Type | Value | Purpose |
+|---|---|---|---|
+| `familyfoodiebook.com` | MX | `10 inbound-smtp.us-east-2.amazonaws.com` | Mail for the domain goes to SES |
+| `familyfoodiebook.com` | TXT | `v=spf1 include:amazonses.com ~all` | SPF for the bare domain |
+| `_dmarc.familyfoodiebook.com` | TXT | `v=DMARC1; p=none; rua=mailto:dmarc-reports@familyfoodiebook.com` | DMARC, report-only for now |
+| three `…._domainkey.familyfoodiebook.com` | CNAME | `….dkim.amazonses.com` | Easy DKIM, so mail SES sends for us passes DMARC |
+| `mail.familyfoodiebook.com` | MX | `10 feedback-smtp.us-east-2.amazonses.com` | Custom MAIL FROM: bounces come back to SES |
+| `mail.familyfoodiebook.com` | TXT | `v=spf1 include:amazonses.com ~all` | SPF for the MAIL FROM subdomain |
+
+These are also step 1 of [plans/email-with-ses.md](plans/email-with-ses.md), so moving Cognito's emails to SES later needs no more DNS work.
+
+**One-time setup outside the stack** (done 2026-10-26; repeat only for a new account or a new address). The address is personal, so it's kept out of Git and out of the CloudFormation template:
+1. Store the destination: `aws ssm put-parameter --name /recipe-book/support-forward-to --type String --value <inbox address> --profile recipe-book`. In Git Bash, prefix the command with `MSYS_NO_PATHCONV=1` (see §9).
+2. While SES is in the **sandbox**, it only sends to verified addresses, so verify the inbox: `aws sesv2 create-email-identity --email-identity <inbox address> --profile recipe-book`, then click the link AWS emails to it. Check with `aws sesv2 get-email-identity --email-identity <inbox address> --profile recipe-book` (`VerifiedForSendingStatus: true`). After SES production access is granted, this step isn't needed.
+3. Deploy. The domain identity verifies itself within minutes of the DKIM records going live: `aws sesv2 get-email-identity --email-identity familyfoodiebook.com --profile recipe-book` shows `VerifiedForSendingStatus: true` and `DkimAttributes.Status: SUCCESS`.
+
+**Changing the destination:** overwrite the parameter (`put-parameter … --overwrite`) and, while in the sandbox, verify the new address as in step 2. The forwarder reads the parameter for every message, so no deploy is needed.
+
+**Testing:** from any other mailbox, send a message to `support@familyfoodiebook.com`. It should arrive within a minute, from "<you> via Family Foodie Book". If it doesn't:
+- look in the inbox's spam folder;
+- CloudWatch Logs → `RecipeBook-MailForwarderLogs…`: one JSON line per message, `"forwarded": true`, or `false` with a reason (`spam`, `virus`, `dmarc-reject`, `rejected`);
+- the raw message is in the mail bucket (stack output `MailBucketName`) under `support/<message id>`.
+
+**Look after the sending reputation:**
+- **Don't press "Report spam"** on a forwarded message. The copy comes from familyfoodiebook.com, so the inbox provider learns that *our* domain sends spam (some providers also report it to SES as a complaint). That hurts delivery of the site's own emails later. Delete it, or make a filter.
+- In the sandbox SES sends at most **200 messages a day**, 1 per second. That's plenty for support mail; production access (plan step 2) raises it.
+
+**Replying as support@:** not set up yet. SES would need production access (the sandbox can only send to verified addresses), and then a way to send. One option is Gmail's "Send mail as" with SES SMTP credentials, which need an IAM user; check the project's policies allow that first. Until then, replies come from the inbox's own address.
+
+**Reading stored mail and DMARC reports:** `aws s3 ls s3://<MailBucketName>/dmarc-reports/ --profile recipe-book`, then `aws s3 cp` a file. Each one is a whole email, with the report attached as a zipped XML file. Everything in the bucket is deleted automatically after 365 days.
+
+**Cost:** SES receiving is $0.10 per 1,000 messages, plus $0.09 per 1,000 incoming 256 KB chunks; forwarding is $0.10 per 1,000 sent. At support volumes that's cents, paid from the Free plan credits.
+
+**If the project is paused** (spend limit, or the Free plan ending), support@ stops receiving along with the site, and senders get a bounce.
+
+## 8. Monitoring and checking
 
 | What | Where |
 |---|---|
@@ -82,11 +132,14 @@ There are 38 tests: API behavior, route parity between the gateway and FastAPI, 
 | Pipeline runs and build logs | CodePipeline → `recipe-book`; CodeBuild → `recipe-book-test`, `-synth`, `-deploy` |
 | Accounts | Cognito → user pool `us-east-2_aMAe1QAlk` |
 | Data | DynamoDB → the `RecipeBook-Table…` table (Explore items) |
+| support@ forwarding (one line per message, no content) | CloudWatch Logs → `RecipeBook-MailForwarderLogs…` |
+| Received mail and DMARC reports | S3 → the bucket in the `MailBucketName` stack output (`support/`, `dmarc-reports/`) |
+| SES identities, sandbox status, receipt rules | SES console (us-east-2) → Identities; Account dashboard; Email receiving |
 | Spend and credits | AWS Settings → Billing |
 
 Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico` returns 200; the API's `/public/recipes` returns 200; `/me` with no token returns 401.
 
-## 8. Troubleshooting (problems actually met on this project)
+## 9. Troubleshooting (problems actually met on this project)
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -100,10 +153,14 @@ Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico` r
 | New pipeline run never starts | An earlier run is waiting for approval (QUEUED mode) | Approve, reject or stop the earlier run |
 | Sign-up emails stop arriving | Cognito's built-in sender allows only about 50 emails a day | Switch Cognito to Amazon SES; see [plans/email-with-ses.md](plans/email-with-ses.md) |
 | Sudden "Access Denied" on things that worked | The project's spend limit, or the Free plan's credits or end date | AWS Settings → Billing; check the plan and spend limit |
+| `aws login` says "Invalid choice", or other commands say "Unable to locate credentials" | Two AWS CLIs are installed. The one first on the PATH (`C:\Program Files\Amazon\AWSCLIV2`, v2.22) predates `aws login` and can't read its sign-in | Use `C:\Users\jacob\AppData\Local\Programs\Amazon\AWSCLIV2\aws.exe` (v2.38), or uninstall the old one |
+| Mail to support@ isn't forwarded; the log says `"reason": "rejected"` and "not verified" | SES is in the sandbox and the inbox address isn't verified | Verify it (§7, step 2) and click the emailed link |
+| Mail to support@ bounces | The receipt rule set isn't active, or the domain identity isn't verified yet | SES console → Email receiving: `MailRules…` should be **Active**; Identities: `familyfoodiebook.com` **Verified** |
 
-## 9. Cleanup
+## 10. Cleanup
 
-- **Remove the app**: `cd infra; npx cdk destroy RecipeBook --profile recipe-book`. The **DynamoDB table and Cognito user pool are kept** (RETAIN). Delete them by hand only if you really want the data and accounts gone.
+- **Remove the app**: `cd infra; npx cdk destroy RecipeBook --profile recipe-book`. The **DynamoDB table, Cognito user pool and mail bucket are kept** (RETAIN). Delete them by hand only if you really want the data, accounts and support mail gone. Destroying also deactivates the receipt rule set, so support@ starts bouncing.
+- **Made by hand for support email** (§7), not removed by `cdk destroy`: the Parameter Store parameter `/recipe-book/support-forward-to`, and the SES identity for the inbox address.
 - **Remove the pipeline**: `npx cdk destroy RecipeBookPipeline`.
 - **Keep** the hosted zone, the certificate (and its validation records) and the CDK bootstrap stack (`CDKToolkit`) if you plan to redeploy.
 - **Known leftovers** from an earlier teardown, both empty and safe to delete once you confirm: table `RecipeBook-TableCD117FA1-T61QGMDHM8PS` and user pool `us-east-2_bRqGjSz7A`.

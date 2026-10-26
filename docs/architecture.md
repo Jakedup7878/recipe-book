@@ -159,7 +159,7 @@ Plain HTML, CSS and JavaScript, as the owner asked: no framework, no bundler, no
 ```mermaid
 flowchart LR
   P[push to main] --> S[Source<br/>GitHub via CodeConnections]
-  S --> T[Test<br/>pytest, 38 tests]
+  S --> T[Test<br/>pytest, 66 tests]
   T --> Y[Synth<br/>cdk synth + cdk diff]
   Y --> A{Manual approval}
   A -->|approved| D[Deploy<br/>cdk deploy of the exact Synth output]
@@ -178,6 +178,7 @@ flowchart LR
 - **CloudFront** answers for both names. A **CloudFront Function** returns a 301 redirect for anything that isn't exactly `familyfoodiebook.com`, keeping the path and query string. That covers `www.` and the default `*.cloudfront.net` name.
 - **Route 53** A and AAAA alias records point both names at the distribution.
 - **Configuration** is in `infra/cdk.json` (`context.domain`). Without it, the stack still deploys and uses the CloudFront address.
+- **Mail**: `support@familyfoodiebook.com` is received by **SES in us-east-2** (MX record), stored in a private S3 bucket and forwarded by a small Lambda to the owner's inbox, whose address is kept in Parameter Store. Any other address at the domain is rejected. The domain identity (DKIM, `mail.` MAIL FROM), SPF and DMARC (`p=none`) it needs are also the groundwork for sending the site's own email through SES later. Details: [operations.md §7](operations.md#7-support-email-supportfamilyfoodiebookcom).
 
 ## 9. Costs
 
@@ -193,6 +194,7 @@ Approximate, at today's small scale. Check the AWS pricing pages for exact figur
 | Cognito (Lite) | Monthly active users | Free at this scale |
 | CodePipeline / CodeBuild | Per active pipeline, per build minute | Small; only when you push |
 | ACM certificate | Free | $0 |
+| SES (support@ receiving and forwarding) | $0.10 per 1,000 received plus $0.09 per 1,000 256 KB chunks; $0.10 per 1,000 forwarded | Cents |
 | Domain registration | Paid to the outside registrar | Yearly |
 
 The project's Free plan credits ($119.71 remaining, plan expiring 2027-04-20) cover this. See AWS Settings → Billing for the current state.
@@ -218,3 +220,4 @@ A record of the less obvious choices, so future changes start from the reasoning
 | 13 | RETAIN on the table and user pool | Real accounts and recipes must survive mistakes. | Never, for production data. |
 | 14 | A local stand-in for Cognito (SQLite) instead of a cloud test pool | It works offline and costs nothing. It speaks the same API shapes, so the site code is unchanged. | You need a feature the stand-in doesn't fake (MFA, for example). |
 | 15 | Lambda bundling with pip platform wheels instead of Docker | No Docker on the development PC. pip downloads Linux ARM64 wheels directly. Docker is the fallback. | A dependency without prebuilt wheels is added. |
+| 16 | support@ received by SES and forwarded by a Lambda, instead of a free forwarding service or a hosted mailbox | Privacy and deletion requests stay with AWS, the only processor the Privacy Policy names. It costs cents, it's all in CDK, and it lays the groundwork for sending through SES. The trade-off: replies come from the inbox's own address, not support@. | You need to reply as support@ (add a sending path after SES production access), or want a real shared mailbox. |

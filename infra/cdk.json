@@ -13,7 +13,8 @@
     "domain": {
       "name": "familyfoodiebook.com",
       "certificateArn": "arn:aws:acm:us-east-1:202518310652:certificate/61403a14-1888-4de7-8f3e-5f5e4a6c6f22",
-      "hostedZoneId": "Z02506442RXVZGAXGYTYE"
+      "hostedZoneId": "Z02506442RXVZGAXGYTYE",
+      "supportForwardToParameter": "/recipe-book/support-forward-to"
     }
   }
 }

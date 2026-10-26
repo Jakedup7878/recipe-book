@@ -19,17 +19,23 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
     aws_cognito as cognito,
     aws_dynamodb as dynamodb,
+    aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_route53 as route53,
     aws_route53_targets as route53_targets,
     aws_s3 as s3,
     aws_s3_deployment as s3deploy,
+    aws_ses as ses,
+    aws_ses_actions as ses_actions,
+    custom_resources as cr,
 )
 from constructs import Construct
 
 ROOT = Path(__file__).resolve().parent.parent
 API_SOURCE = ROOT / "backend" / "recipe_api"
+MAIL_FORWARDER_SOURCE = ROOT / "backend" / "mail_forwarder"
+MAIL_RETENTION_DAYS = 365  # raw support mail and DMARC reports in the mail bucket
 LAMBDA_RUNTIME = lambda_.Runtime.PYTHON_3_13
 LAMBDA_PYTHON_VERSION = "3.13"
 
@@ -120,6 +126,10 @@ class RecipeBookStack(Stack):
         The certificate must already be ISSUED in us-east-1 (CloudFront only uses certificates
         from there, and this project can't run CloudFormation in us-east-1) and must cover both
         the name and www.<name>. The hosted zone is the one Route 53 created for the domain.
+
+        Optional `supportForwardToParameter`: the name of a Parameter Store String holding the
+        inbox that support@<name> forwards to. With it, SES receives mail for the domain; see
+        docs/operations.md. The parameter is created by hand so the address stays out of Git.
         """
         super().__init__(scope, construct_id, **kwargs)
 
@@ -205,7 +215,7 @@ class RecipeBookStack(Stack):
         )
 
         if domain:
-            zone = route53.HostedZone.from_hosted_zone_attributes(
+            zone = route53.PublicHostedZone.from_public_hosted_zone_attributes(
                 self, "Zone", hosted_zone_id=domain["hostedZoneId"], zone_name=apex)
             target = route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(distribution))
             for record_id, record_name in (("Apex", None), ("Www", "www")):
@@ -332,3 +342,108 @@ class RecipeBookStack(Stack):
         CfnOutput(self, "SiteUrl", value=site_url)
         CfnOutput(self, "ApiUrl", value=http_api.api_endpoint)
         CfnOutput(self, "UserPoolId", value=user_pool.user_pool_id)
+
+        forward_to_parameter = (domain or {}).get("supportForwardToParameter")
+        if domain and forward_to_parameter:
+            self._support_mail(zone, apex, forward_to_parameter)
+
+    def _support_mail(self, zone, apex, forward_to_parameter):
+        """support@ is received by SES, kept in S3 and forwarded to the owner's inbox.
+
+        Also does step 1 of docs/plans/email-with-ses.md (domain identity, DKIM, MAIL FROM,
+        DMARC), which sending from the domain later needs too.
+        """
+        region = self.region
+        support_address = f"support@{apex}"
+        dmarc_address = f"dmarc-reports@{apex}"
+
+        # Domain identity with Easy DKIM and a MAIL FROM subdomain: CDK adds the three DKIM
+        # CNAMEs and the MAIL FROM MX and SPF records to the zone. SES only receives mail for
+        # a verified domain, and forwarding from support@ needs DKIM to pass DMARC.
+        ses.EmailIdentity(
+            self, "MailDomain",
+            identity=ses.Identity.public_hosted_zone(zone),
+            mail_from_domain=f"mail.{apex}",
+        )
+        route53.MxRecord(self, "MailMx", zone=zone, values=[
+            route53.MxRecordValue(host_name=f"inbound-smtp.{region}.amazonaws.com", priority=10)])
+        # SES sends with mail.<apex> as the envelope sender, which has its own SPF record; this
+        # one covers the bare domain. DMARC is report-only (p=none) until the reports look clean.
+        route53.TxtRecord(self, "MailSpf", zone=zone, values=["v=spf1 include:amazonses.com ~all"])
+        route53.TxtRecord(self, "MailDmarc", zone=zone, record_name="_dmarc",
+                          values=[f"v=DMARC1; p=none; rua=mailto:{dmarc_address}"])
+
+        # Raw messages are real correspondence (deletion requests, abuse reports), so RETAINed.
+        mail_bucket = s3.Bucket(
+            self, "MailBucket",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            lifecycle_rules=[s3.LifecycleRule(expiration=Duration.days(MAIL_RETENTION_DAYS))],
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        forwarder_logs = logs.LogGroup(self, "MailForwarderLogs",
+                                       retention=logs.RetentionDays.ONE_MONTH, removal_policy=RemovalPolicy.DESTROY)
+        forwarder = lambda_.Function(
+            self, "MailForwarder",
+            runtime=LAMBDA_RUNTIME,
+            architecture=lambda_.Architecture.ARM_64,
+            handler="forwarder.handler",
+            code=lambda_.Code.from_asset(str(MAIL_FORWARDER_SOURCE), exclude=["__pycache__", "*.pyc"]),
+            memory_size=512,  # a message with attachments is held in memory a few times over
+            timeout=Duration.seconds(30),
+            environment={
+                "FROM_ADDRESS": support_address,
+                "MAIL_BUCKET": mail_bucket.bucket_name,
+                "MAIL_PREFIX": "support/",
+                "FORWARD_TO_PARAMETER": forward_to_parameter,
+            },
+            log_group=forwarder_logs,
+        )
+        mail_bucket.grant_read(forwarder, "support/*")
+        forwarder.add_to_role_policy(iam.PolicyStatement(
+            actions=["ssm:GetParameter"],
+            resources=[self.format_arn(service="ssm", resource="parameter",
+                                       resource_name=forward_to_parameter.lstrip("/"))]))
+        # In the SES sandbox the recipient must be a verified identity as well as the sender,
+        # and its address is only known at run time, so this covers the project's identities.
+        forwarder.add_to_role_policy(iam.PolicyStatement(
+            actions=["ses:SendEmail", "ses:SendRawEmail"],
+            resources=[self.format_arn(service="ses", resource="identity", resource_name="*")]))
+
+        # SES rejects mail for any address no rule names, so only these two receive mail.
+        rule_set = ses.ReceiptRuleSet(self, "MailRules", rules=[
+            ses.ReceiptRuleOptions(
+                recipients=[support_address],
+                scan_enabled=True,  # spam and virus verdicts for the forwarder
+                actions=[
+                    ses_actions.S3(bucket=mail_bucket, object_key_prefix="support/"),
+                    ses_actions.Lambda(function=forwarder,
+                                       invocation_type=ses_actions.LambdaInvocationType.EVENT),
+                ],
+            ),
+            ses.ReceiptRuleOptions(
+                recipients=[dmarc_address],
+                scan_enabled=True,
+                actions=[ses_actions.S3(bucket=mail_bucket, object_key_prefix="dmarc-reports/")],
+            ),
+        ])
+        # CloudFormation can create a rule set but not make it the active one (one per Region),
+        # so a custom resource does that, and deactivates it again if this is removed.
+        cr.AwsCustomResource(
+            self, "ActivateMailRules",
+            on_update=cr.AwsSdkCall(  # also used on create
+                service="SES", action="setActiveReceiptRuleSet",
+                parameters={"RuleSetName": rule_set.receipt_rule_set_name},
+                physical_resource_id=cr.PhysicalResourceId.of("active-receipt-rule-set"),
+            ),
+            on_delete=cr.AwsSdkCall(service="SES", action="setActiveReceiptRuleSet", parameters={}),
+            policy=cr.AwsCustomResourcePolicy.from_statements([iam.PolicyStatement(
+                actions=["ses:SetActiveReceiptRuleSet"], resources=["*"])]),  # no resource-level form
+            install_latest_aws_sdk=False,
+            log_group=logs.LogGroup(self, "ActivateMailRulesLogs", retention=logs.RetentionDays.ONE_MONTH,
+                                    removal_policy=RemovalPolicy.DESTROY),
+        )
+
+        CfnOutput(self, "MailBucketName", value=mail_bucket.bucket_name)

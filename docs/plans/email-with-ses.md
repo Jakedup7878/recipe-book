@@ -4,7 +4,7 @@
 - **account emails** (sign-up codes, password resets), sent by Cognito;
 - later, **opt-in emails**: the weekly world-meal digest, family invites by email, receipts for paid plans.
 
-Status: **planned, not built.** SES is included in the project's Free plan.
+Status: **step 1 built** (2026-10-26) as part of receiving mail for `support@familyfoodiebook.com` (see [operations.md §7](../operations.md#7-support-email-supportfamilyfoodiebookcom)); **steps 2-5 planned, not built.** SES is included in the project's Free plan.
 
 ## 1. Why this is needed
 
@@ -25,9 +25,11 @@ Everything except the production-access request can be defined in the CDK app (`
 - Add a **custom MAIL FROM domain** such as `mail.familyfoodiebook.com`, which needs one MX record and one SPF TXT record. Bounces then go to our domain, and SPF and DMARC line up.
 - Add a **DMARC** TXT record at `_dmarc.familyfoodiebook.com`. Start in report-only mode (`p=none`, with reports to an address you read). After a few clean weeks, move to `p=quarantine`. Gmail and Yahoo require DMARC from bulk senders.
 
+**Done (2026-10-26).** `_support_mail()` in `infra/recipe_stack.py` creates the domain identity with Easy DKIM, `mail.familyfoodiebook.com` as MAIL FROM, an apex SPF record (`v=spf1 include:amazonses.com ~all`), and DMARC at `p=none` with reports to `dmarc-reports@familyfoodiebook.com`, stored in the mail bucket. Later steps reuse this identity; don't create a second one. Any new sender (another provider, for example) must be **added to the same apex SPF record**, because a domain can have only one.
+
 ### Step 2: request production access
 
-- New SES accounts start in the **sandbox** in each Region: mail can only go to **verified** addresses, at most **200 a day** and **1 per second**. Cognito can't email real users until this is lifted.
+- New SES accounts start in the **sandbox** in each Region: mail can only go to **verified** addresses, at most **200 a day** and **1 per second**. Cognito can't email real users until this is lifted. (The support@ forwarder works in the sandbox only because its one destination is verified. Replying *as* support@ also needs production access.)
 - Request production access in the SES console (Account dashboard → *Request production access*). Describe the use honestly and specifically:
   - **transactional**: sign-up confirmation codes and password resets for familyfoodiebook.com;
   - **later, opt-in only**: a weekly recipe digest;
@@ -39,7 +41,7 @@ Everything except the production-access request can be defined in the CDK app (`
 
 - In the user pool settings, change the email sending from *Cognito* to *SES* (`DEVELOPER` mode):
   - From: `Family Foodie Book <no-reply@familyfoodiebook.com>`;
-  - Reply-to: a mailbox you actually read, for example `support@familyfoodiebook.com`;
+  - Reply-to: `support@familyfoodiebook.com`, which receives mail and forwards it to the owner's inbox;
   - the SES Region: us-east-2;
   - the SES configuration set from step 4.
 - Cognito then sends through **our** SES account, with our domain and our sending limits.
@@ -71,15 +73,15 @@ Sending reputation is what keeps mail out of spam folders, and SES watches it cl
 
 | Where | Change |
 |---|---|
-| `infra/recipe_stack.py` | The SES domain identity (DKIM, MAIL FROM) in the existing Route 53 zone; configuration sets; the event destination and bounce/complaint Lambda; alarms; the user pool `email` setting; later the digest sender and its queue |
+| `infra/recipe_stack.py` | ~~The SES domain identity (DKIM, MAIL FROM) in the existing Route 53 zone~~ (done); configuration sets; the event destination and bounce/complaint Lambda; alarms; the user pool `email` setting; later the digest sender and its queue |
 | `backend/recipe_api/main.py` | Email preferences in the profile model; a public, signed unsubscribe endpoint (rate-limited per IP); never sending to bounced or opted-out profiles |
 | `frontend/app.js` | Email preferences on the profile page |
-| Route 53 | DKIM CNAMEs, MAIL FROM MX and SPF, DMARC (all through the CDK) |
+| Route 53 | ~~DKIM CNAMEs, MAIL FROM MX and SPF, DMARC (all through the CDK)~~ (done, with the support@ MX) |
 | Tests | DNS records exist; the user pool uses SES with the right from-address; unsubscribe works and is signed; bounces and complaints mark the profile |
 
 ## 4. Order of work
 
-1. Domain identity, DKIM, MAIL FROM and DMARC (`p=none`). Wait until the domain shows **verified**.
+1. ~~Domain identity, DKIM, MAIL FROM and DMARC (`p=none`). Wait until the domain shows **verified**.~~ Done with support@ receiving.
 2. Request production access. Meanwhile, test by sending to your own verified address.
 3. The bounce/complaint handling, suppression list and alarms. **Before** sending to anyone else.
 4. Switch Cognito to SES and customize the templates. Test sign-up and password reset end to end.

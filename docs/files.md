@@ -145,6 +145,22 @@ Only this folder is packaged into the Lambda function.
 
 ---
 
+## `backend/mail_forwarder/`: the support@ mail forwarder
+
+### `backend/mail_forwarder/forwarder.py`
+**What:** A small Lambda that SES runs for each message to `support@familyfoodiebook.com`, after storing it in the mail bucket. It:
+- skips mail SES marks as a virus or spam, and mail failing its sender's DMARC `reject` policy (those stay in the bucket);
+- reads the stored message, sets From to `"<sender> via Family Foodie Book" <support@…>` and Reply-To to the original sender, and drops the old DKIM signature, Message-ID, Sender and Return-Path;
+- sends it with SES to the inbox named in Parameter Store (`/recipe-book/support-forward-to`).
+
+**Why:**
+- **SES only sends from verified identities**, so the copy can't keep the sender's own From. Reply-To makes the inbox's Reply button answer the sender.
+- **The address is read from Parameter Store for each message**, so it's not in the repository or the template, and changing it needs no deploy.
+- **Only the standard library and boto3**, so there's nothing to bundle. `compat32` parsing writes the body back exactly as it arrived.
+- **Logs hold the message ID and outcome only**, never the sender or the content.
+
+---
+
 ## `backend/`: local development and shared helpers
 
 ### `backend/local_dev.py`
@@ -223,6 +239,14 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 
 **Why:** The frontend has no build step, so nothing else would catch a typo in an API path or a JavaScript syntax error before deploy. A missing file shows up on the live site as a 403, not a 404, which is confusing to diagnose. Inline code works on the local server, which sends no CSP, but is blocked live, so it's checked here.
 
+### `backend/tests/test_mail_forwarder.py`
+**What:** The support@ forwarder, with fake S3, SES and Parameter Store clients:
+- From becomes support@ with the sender's decoded name, Reply-To is the sender (or their own Reply-To), and the old signature headers are gone while the body is unchanged;
+- virus, spam and DMARC-`reject` failures aren't forwarded;
+- the handler reads `support/<message id>` and sends to the address from Parameter Store.
+
+**Why:** A mistake here loses privacy and deletion requests without anyone noticing, so the header handling is checked without needing AWS.
+
 ### `backend/tests/test_local_dev.py`
 **What:** Tests the local dev server:
 - sign-up with emailed codes, then using the API;
@@ -259,6 +283,7 @@ It tags everything `project=recipe-book`.
 - **Lambda** (Python 3.13 ARM64, 512 MB, 10 s, one-month logs) with **local pip bundling**;
 - **HTTP API** with CORS for the site's one host, the Cognito authorizer, every route from `ROUTES`, stage throttling and JSON access logs;
 - **BucketDeployment** that uploads `frontend/` plus a generated `config.json` and clears the CloudFront cache;
+- optional **support mail** (`_support_mail`, with `supportForwardToParameter`): the SES domain identity with DKIM and MAIL FROM, the MX, SPF and DMARC records, a **RETAINed** mail bucket (365-day expiry), the forwarder Lambda, the receipt rules for `support@` and `dmarc-reports@`, and a custom resource that activates them;
 - outputs.
 
 **Why:**
@@ -269,8 +294,9 @@ It tags everything `project=recipe-book`.
 - **`prevent_user_existence_errors`**, so sign-in and reset errors don't reveal which emails have accounts.
 - **CSP `connect-src`** allows only this Region's API Gateway and Cognito endpoints.
 - **`PRICE_CLASS_100`** (North America and Europe edge locations) is the cheapest class and fits the audience.
-- **RETAIN only on data**: the table and user pool. Everything else can be rebuilt, so it's deleted with the stack.
+- **RETAIN only on data**: the table, the user pool and the mail bucket. Everything else can be rebuilt, so it's deleted with the stack.
 - **The domain is optional.** Without `context.domain`, the stack still deploys using the CloudFront address. That's useful for testing and was how the site first launched.
+- **Support mail is optional too**, and needs the domain. CloudFormation can create a receipt rule set but not make it the active one, so an `AwsCustomResource` calls `SetActiveReceiptRuleSet` (and deactivates it on delete). The forwarding address isn't in the stack at all; see `forwarder.py`.
 
 ### `infra/pipeline_stack.py`
 **What:** The CI/CD stack:
@@ -293,7 +319,7 @@ It tags everything `project=recipe-book`.
 - the `app` command (the local virtual environment's Python, on Windows);
 - `watch` excludes;
 - `context.github` (owner `Jakedup7878`, repo `recipe-book`, branch `main`);
-- `context.domain` (`familyfoodiebook.com`, the us-east-1 certificate ARN, the hosted zone ID).
+- `context.domain` (`familyfoodiebook.com`, the us-east-1 certificate ARN, the hosted zone ID, and `supportForwardToParameter`, the Parameter Store name that holds the support@ forwarding address).
 
 **Why:** Deployment settings are configuration, not code. The buildspecs pass `--app "python app.py"` explicitly, because the `app` line points at the Windows virtual-environment path, which doesn't exist on the Linux build machines.
 
@@ -309,7 +335,8 @@ It tags everything `project=recipe-book`.
 **What:** Synthesizes the app stack and checks four things:
 - the table and user pool are retained;
 - without a domain, the site uses the CloudFront address;
-- with a domain, both names, the certificate, the redirect function, the DNS records and CORS are set up correctly.
+- with a domain, both names, the certificate, the redirect function, the DNS records and CORS are set up correctly;
+- with support mail, the mail DNS records sit alongside the unchanged site records; support@ is stored then forwarded and dmarc-reports@ only stored; the rule set is activated; the mail bucket is retained with a 365-day expiry; the forwarder can read only its one parameter; and no address other than the domain's own appears in the template. Without the parameter setting, none of it is created.
 
 Bundling is skipped via CDK context so the tests run fast.
 
