@@ -134,6 +134,18 @@ def seed(app, pool):
                         json={"text": "Made this twice already. The brown butter is everything."})
             client.post(f"/recipes/{created['recipeId']}/comments", headers=as_user["carol@example.com"],
                         json={"text": "Can I swap the eggs for flax?"})
+    # A second family, so Alice is in two (accounts can belong to several).
+    riveras = client.post("/families", json={"name": "The Rivera Kitchen"}, headers=as_user["carol@example.com"]).json()
+    client.post("/families/join", json={"inviteCode": riveras["inviteCode"]}, headers=as_user["alice@example.com"])
+    client.post("/recipes", headers=as_user["carol@example.com"], json={
+        "title": "Abuela's Pozole Rojo",
+        "description": "Sunday pozole for the whole family.",
+        "ingredients": ["2 lb pork shoulder", "1 can hominy", "4 guajillo chiles", "1 onion", "4 garlic cloves"],
+        "steps": ["Simmer the pork with onion and garlic until tender.",
+                  "Blend the soaked chiles and stir them in with the hominy.",
+                  "Serve with cabbage, radish and lime."],
+        "visibility": "family",
+    })
 
 
 # ---------- app wiring ----------

@@ -6,7 +6,7 @@ protected by a Cognito JWT authorizer at API Gateway, so a verified token's
 claims arrive in the event at requestContext.authorizer.jwt.claims.
 
 Single-table layout (pk / sk):
-  USER#<sub>        PROFILE              account profile, holds familyId
+  USER#<sub>        PROFILE              account profile, holds familyIds (a string set)
   RECIPE#<id>       META                 recipe; gsi1pk = PUBLIC | FAMILYFEED#<familyId>
   RECIPE#<id>       COMMENT#<commentId>  comment on a recipe
   FAMILY#<id>       META                 family name, owner, invite code
@@ -37,6 +37,7 @@ import ratelimit
 IN_LAMBDA = "AWS_LAMBDA_FUNCTION_NAME" in os.environ
 TABLE = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
 FEED_LIMIT = 50
+MAX_FAMILIES = 10  # per account; keeps the home feed to a handful of queries
 INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 app = FastAPI(
@@ -133,7 +134,7 @@ class Profile(BaseModel):
     userId: str
     email: str
     displayName: str
-    familyId: str | None = None
+    familyIds: list[str] = Field(default_factory=list, description="The families this account belongs to.")
     preferences: Preferences | None = None
     createdAt: str
 
@@ -144,6 +145,8 @@ class RecipeIn(BaseModel):
     ingredients: lines(500)
     steps: lines(2000)
     visibility: Literal["public", "family"] = "public"
+    familyId: str | None = Field(None, description="Which of your families can see a family-only recipe. "
+                                                   "Optional when you're in exactly one family.")
 
 
 class Recipe(BaseModel):
@@ -165,7 +168,7 @@ class RecipeList(BaseModel):
 
 
 class Feed(BaseModel):
-    family: list[Recipe] = Field(description="Your family's family-only recipes (empty if not in a family).")
+    family: list[Recipe] = Field(description="Family-only recipes from all your families, newest first.")
     public: list[Recipe] = Field(description="Public recipes from everyone.")
 
 
@@ -209,8 +212,19 @@ class Family(BaseModel):
     inviteCode: str | None = Field(None, description="Only returned to the family owner.")
 
 
-class MyFamily(BaseModel):
-    family: Family | None
+class MyFamilies(BaseModel):
+    families: list[Family] = Field(description="Your families, sorted by name.")
+
+
+class FamilyRename(BaseModel):
+    name: text(60)
+
+
+class InvitePreview(BaseModel):
+    familyId: str
+    name: str
+    memberCount: int
+    alreadyMember: bool
 
 
 # ---------- identity and rate limiting ----------
@@ -305,11 +319,34 @@ def transact(items, conflict_message):
 
 # ---------- profiles ----------
 
+def family_ids(profile):
+    return set(profile.get("familyIds") or ())
+
+
+def upgrade_single_family(item):
+    """Profiles saved before accounts could join several families hold one
+    `familyId`; move it into the `familyIds` set the first time it's read."""
+    try:
+        return TABLE.update_item(
+            Key={"pk": item["pk"], "sk": "PROFILE"},
+            UpdateExpression="ADD familyIds :s REMOVE familyId",
+            ConditionExpression="attribute_exists(familyId)",
+            ExpressionAttributeValues={":s": {item["familyId"]}},
+            ReturnValues="ALL_NEW",
+        )["Attributes"]
+    except ClientError as error:
+        if not is_conditional_failure(error):
+            raise
+        return TABLE.get_item(Key={"pk": item["pk"], "sk": "PROFILE"})["Item"]  # another request upgraded it
+
+
 def get_or_create_profile(claims):
     key = {"pk": f"USER#{claims['sub']}", "sk": "PROFILE"}
     item = TABLE.get_item(Key=key).get("Item")
     if item:
-        return item
+        if "familyId" in item:
+            item = upgrade_single_family(item)
+        return {**item, "familyIds": sorted(family_ids(item))}
     email = claims.get("email", "")
     # The name chosen on the sign-up page arrives as Cognito's standard `name` claim.
     name = (claims.get("name") or "").strip() or email.split("@")[0] or "cook"
@@ -341,9 +378,9 @@ def update_me(update: ProfileUpdate, profile: Writer):
         UpdateExpression="SET displayName = :n",
         ExpressionAttributeValues={":n": update.displayName},
     )
-    if profile.get("familyId"):
+    for family_id in family_ids(profile):
         TABLE.update_item(
-            Key={"pk": f"FAMILY#{profile['familyId']}", "sk": f"MEMBER#{profile['userId']}"},
+            Key={"pk": f"FAMILY#{family_id}", "sk": f"MEMBER#{profile['userId']}"},
             UpdateExpression="SET displayName = :n",
             ExpressionAttributeValues={":n": update.displayName},
         )
@@ -376,8 +413,7 @@ def can_view(recipe, profile):
         return True
     if profile is None:
         return False
-    return recipe["authorId"] == profile["userId"] or (
-        recipe.get("familyId") and recipe["familyId"] == profile.get("familyId"))
+    return recipe["authorId"] == profile["userId"] or recipe.get("familyId") in family_ids(profile)
 
 
 def visible_recipe(recipe_id, profile):
@@ -388,13 +424,24 @@ def visible_recipe(recipe_id, profile):
     return recipe
 
 
-def check_visibility(recipe_in: RecipeIn, profile):
-    if recipe_in.visibility == "family" and not profile.get("familyId"):
+def recipe_family(recipe_in: RecipeIn, profile):
+    """The family a recipe is shared with: None for public, else one of the author's families."""
+    if recipe_in.visibility == "public":
+        return None
+    mine = family_ids(profile)
+    if not mine:
         raise ApiError(400, "Join or create a family before sharing a recipe with family only.")
+    if recipe_in.familyId is None:
+        if len(mine) > 1:
+            raise ApiError(400, "Choose which of your families can see this recipe.")
+        return next(iter(mine))
+    if recipe_in.familyId not in mine:
+        raise ApiError(400, "You can only share family recipes with a family you're in.")
+    return recipe_in.familyId
 
 
-def feed_key(visibility, family_id):
-    return "PUBLIC" if visibility == "public" else f"FAMILYFEED#{family_id}"
+def feed_key(family_id):
+    return f"FAMILYFEED#{family_id}" if family_id else "PUBLIC"
 
 
 def query_feed(partition):
@@ -406,34 +453,37 @@ def query_feed(partition):
     )["Items"]
 
 
+def recipe_fields(recipe_in: RecipeIn, family_id):
+    fields = recipe_in.model_dump(exclude={"familyId"})
+    return {**fields, "familyId": family_id} if family_id else fields
+
+
 @app.post("/recipes", response_model=Recipe, status_code=201, tags=["recipes"])
 def create_recipe(recipe_in: RecipeIn, profile: Writer):
-    check_visibility(recipe_in, profile)
+    family_id = recipe_family(recipe_in, profile)
     recipe_id = uuid.uuid4().hex
     created = now_iso()
     item = {
         "pk": f"RECIPE#{recipe_id}",
         "sk": "META",
         "recipeId": recipe_id,
-        **recipe_in.model_dump(),
+        **recipe_fields(recipe_in, family_id),
         "authorId": profile["userId"],
         "authorName": profile["displayName"],
         "createdAt": created,
         "updatedAt": created,
-        "gsi1pk": feed_key(recipe_in.visibility, profile.get("familyId")),
+        "gsi1pk": feed_key(family_id),
         "gsi1sk": f"{created}#{recipe_id}",
     }
-    if recipe_in.visibility == "family":
-        item["familyId"] = profile["familyId"]
     TABLE.put_item(Item=item)
     return item
 
 
 @app.get("/recipes", response_model=Feed, tags=["recipes"],
-         summary="Your family's recipes and public recipes as separate lists, newest first")
+         summary="Family recipes from all your families, and public recipes, as separate lists, newest first")
 def list_recipes(profile: Reader):
-    family_id = profile.get("familyId")
-    family = query_feed(f"FAMILYFEED#{family_id}") if family_id else []
+    family = [r for family_id in family_ids(profile) for r in query_feed(f"FAMILYFEED#{family_id}")]
+    family = sorted(family, key=lambda r: r["gsi1sk"], reverse=True)[:FEED_LIMIT]
     public = query_feed("PUBLIC")
     named = with_current_names(family + public)
     return {"family": named[:len(family)], "public": named[len(family):]}
@@ -449,14 +499,16 @@ def update_recipe(id: str, recipe_in: RecipeIn, profile: Writer):
     recipe = load_recipe(id)
     if recipe["authorId"] != profile["userId"]:
         raise ApiError(403, "Only the author can edit this recipe.")
-    check_visibility(recipe_in, profile)
-    family_id = profile.get("familyId") if recipe_in.visibility == "family" else None
-    recipe.update(recipe_in.model_dump(), updatedAt=now_iso(), authorName=profile["displayName"],
-                  gsi1pk=feed_key(recipe_in.visibility, family_id))
-    if family_id:
-        recipe["familyId"] = family_id
-    else:
-        recipe.pop("familyId", None)
+    # Editing a family recipe without naming a family keeps it in the one it's in,
+    # even if the author has joined more families since.
+    keep_family = recipe.get("familyId") in family_ids(profile)
+    if recipe_in.visibility == "family" and recipe_in.familyId is None and keep_family:
+        recipe_in = recipe_in.model_copy(update={"familyId": recipe["familyId"]})
+    # Changing visibility to "public" is how an author publishes a family recipe to everyone.
+    family_id = recipe_family(recipe_in, profile)
+    recipe.pop("familyId", None)
+    recipe.update(recipe_fields(recipe_in, family_id), updatedAt=now_iso(), authorName=profile["displayName"],
+                  gsi1pk=feed_key(family_id))
     TABLE.put_item(Item=recipe)
     return recipe
 
@@ -549,30 +601,37 @@ def member_item(family_id, profile, joined):
     }
 
 
-def set_family_on_profile(profile, family_id):
+def add_family_to_profile(profile, family_id):
+    # Fails the transaction if the account is already in this family or in MAX_FAMILIES families.
     return {"Update": {
         "TableName": TABLE.name,
         "Key": {"pk": profile["pk"], "sk": "PROFILE"},
-        "UpdateExpression": "SET familyId = :f",
-        "ConditionExpression": "attribute_exists(pk) AND attribute_not_exists(familyId)",
-        "ExpressionAttributeValues": {":f": family_id},
+        "UpdateExpression": "ADD familyIds :s",
+        "ConditionExpression": "attribute_exists(pk) AND (attribute_not_exists(familyIds) OR "
+                               "(NOT contains(familyIds, :f) AND size(familyIds) < :max))",
+        "ExpressionAttributeValues": {":s": {family_id}, ":f": family_id, ":max": MAX_FAMILIES},
     }}
 
 
-def clear_family_on_profile(user_id, family_id):
+def remove_family_from_profile(user_id, family_id):
     return {"Update": {
         "TableName": TABLE.name,
         "Key": {"pk": f"USER#{user_id}", "sk": "PROFILE"},
-        "UpdateExpression": "REMOVE familyId",
-        "ConditionExpression": "familyId = :f",
-        "ExpressionAttributeValues": {":f": family_id},
+        "UpdateExpression": "DELETE familyIds :s",
+        "ConditionExpression": "contains(familyIds, :f)",
+        "ExpressionAttributeValues": {":s": {family_id}, ":f": family_id},
     }}
 
 
-def require_family(profile, owner_only=False):
-    if not profile.get("familyId"):
-        raise ApiError(404, "You are not in a family.")
-    family = TABLE.get_item(Key={"pk": f"FAMILY#{profile['familyId']}", "sk": "META"}).get("Item")
+def check_room_for_another_family(profile):
+    if len(family_ids(profile)) >= MAX_FAMILIES:
+        raise ApiError(409, f"You can be in up to {MAX_FAMILIES} families. Leave one first.")
+
+
+def require_family(profile, family_id, owner_only=False):
+    if family_id not in family_ids(profile):
+        raise ApiError(404, "You are not in that family.")
+    family = TABLE.get_item(Key={"pk": f"FAMILY#{family_id}", "sk": "META"}).get("Item")
     if not family:
         raise ApiError(404, "Family not found.")
     if owner_only and family["ownerId"] != profile["userId"]:
@@ -580,10 +639,22 @@ def require_family(profile, owner_only=False):
     return family
 
 
+def lookup_invite(invite_code):
+    code = invite_code.strip().upper()
+    invite = TABLE.get_item(Key={"pk": f"INVITE#{code}", "sk": "META"}).get("Item")
+    if not invite:
+        raise ApiError(404, "That invite code is not valid.")
+    return code, invite["familyId"]
+
+
+def my_families_view(profile):
+    families = [family_view(family_id, profile["userId"]) for family_id in family_ids(profile)]
+    return {"families": sorted(families, key=lambda f: (f["name"].lower(), f["familyId"]))}
+
+
 @app.post("/families", response_model=Family, status_code=201, tags=["families"])
 def create_family(family_in: FamilyCreate, profile: Writer):
-    if profile.get("familyId"):
-        raise ApiError(409, "You are already in a family. Leave it first.")
+    check_room_for_another_family(profile)
     family_id, code, created = uuid.uuid4().hex, new_invite_code(), now_iso()
     transact([
         {"Put": {"TableName": TABLE.name, "ConditionExpression": "attribute_not_exists(pk)", "Item": {
@@ -592,92 +663,126 @@ def create_family(family_in: FamilyCreate, profile: Writer):
         {"Put": {"TableName": TABLE.name, "Item": member_item(family_id, profile, created)}},
         {"Put": {"TableName": TABLE.name, "ConditionExpression": "attribute_not_exists(pk)", "Item": {
             "pk": f"INVITE#{code}", "sk": "META", "familyId": family_id}}},
-        set_family_on_profile(profile, family_id),
-    ], "You are already in a family. Leave it first.")
+        add_family_to_profile(profile, family_id),
+    ], f"You can be in up to {MAX_FAMILIES} families. Leave one first.")
     return family_view(family_id, profile["userId"])
 
 
-@app.get("/families/mine", response_model=MyFamily, tags=["families"])
-def my_family(profile: Reader):
-    if not profile.get("familyId"):
-        return {"family": None}
-    return {"family": family_view(profile["familyId"], profile["userId"])}
+@app.get("/families/mine", response_model=MyFamilies, tags=["families"])
+def my_families(profile: Reader):
+    return my_families_view(profile)
+
+
+@app.get("/families/invite/{code}", response_model=InvitePreview, tags=["families"],
+         summary="Which family an invite code is for, so a join link can say what you're joining")
+def preview_invite(code: str, profile: Reader):
+    _, family_id = lookup_invite(code)
+    family = TABLE.get_item(Key={"pk": f"FAMILY#{family_id}", "sk": "META"}).get("Item")
+    if not family:
+        raise ApiError(404, "That invite code is not valid.")
+    members = TABLE.query(
+        KeyConditionExpression=Key("pk").eq(f"FAMILY#{family_id}") & Key("sk").begins_with("MEMBER#"),
+        Select="COUNT",
+    )["Count"]
+    return {"familyId": family_id, "name": family["name"], "memberCount": members,
+            "alreadyMember": family_id in family_ids(profile)}
 
 
 @app.post("/families/join", response_model=Family, tags=["families"])
 def join_family(join: FamilyJoin, profile: Writer):
-    if profile.get("familyId"):
-        raise ApiError(409, "You are already in a family. Leave it first.")
-    code = join.inviteCode.upper()
-    invite = TABLE.get_item(Key={"pk": f"INVITE#{code}", "sk": "META"}).get("Item")
-    if not invite:
-        raise ApiError(404, "That invite code is not valid.")
-    family_id = invite["familyId"]
+    code, family_id = lookup_invite(join.inviteCode)
+    if family_id in family_ids(profile):
+        raise ApiError(409, "You're already in this family.")
+    check_room_for_another_family(profile)
     transact([
         {"ConditionCheck": {"TableName": TABLE.name, "Key": {"pk": f"FAMILY#{family_id}", "sk": "META"},
                             "ConditionExpression": "inviteCode = :c",
                             "ExpressionAttributeValues": {":c": code}}},
         {"Put": {"TableName": TABLE.name, "Item": member_item(family_id, profile, now_iso())}},
-        set_family_on_profile(profile, family_id),
-    ], "Could not join: you may already be in a family, or the code was just changed.")
+        add_family_to_profile(profile, family_id),
+    ], "Could not join: you may already be in this family, or the code was just changed.")
     return family_view(family_id, profile["userId"])
 
 
-@app.post("/families/leave", response_model=MyFamily, tags=["families"],
-          summary="Leave your family (ownership passes on; the last member out deletes it)")
-def leave_family(profile: Writer):
-    family = require_family(profile)
-    family_id, user_id = family["familyId"], profile["userId"]
+@app.put("/families/{familyId}", response_model=Family, tags=["families"],
+         summary="Rename a family (owner only)")
+def rename_family(familyId: str, rename: FamilyRename, profile: Writer):
+    family = require_family(profile, familyId, owner_only=True)
+    TABLE.update_item(Key={"pk": family["pk"], "sk": "META"}, UpdateExpression="SET #n = :n",
+                      ExpressionAttributeNames={"#n": "name"}, ExpressionAttributeValues={":n": rename.name})
+    return family_view(familyId, profile["userId"])
+
+
+@app.get("/families/{familyId}/recipes", response_model=RecipeList, tags=["families"],
+         summary="One family's family-only recipes, newest first (members only)")
+def family_recipes(familyId: str, profile: Reader):
+    require_family(profile, familyId)
+    return {"recipes": with_current_names(query_feed(f"FAMILYFEED#{familyId}"))}
+
+
+@app.post("/families/{familyId}/leave", response_model=MyFamilies, tags=["families"],
+          summary="Leave a family (ownership passes on; the last member out deletes it)")
+def leave_family(familyId: str, profile: Writer):
+    family = require_family(profile, familyId)
+    user_id = profile["userId"]
     members = TABLE.query(
-        KeyConditionExpression=Key("pk").eq(f"FAMILY#{family_id}") & Key("sk").begins_with("MEMBER#"),
+        KeyConditionExpression=Key("pk").eq(f"FAMILY#{familyId}") & Key("sk").begins_with("MEMBER#"),
     )["Items"]
     others = sorted((m for m in members if m["userId"] != user_id), key=lambda m: m["joinedAt"])
     items = [
-        {"Delete": {"TableName": TABLE.name, "Key": {"pk": f"FAMILY#{family_id}", "sk": f"MEMBER#{user_id}"}}},
-        clear_family_on_profile(user_id, family_id),
+        {"Delete": {"TableName": TABLE.name, "Key": {"pk": f"FAMILY#{familyId}", "sk": f"MEMBER#{user_id}"}}},
+        remove_family_from_profile(user_id, familyId),
     ]
     if not others:
         # Last member out: remove the family and its invite code.
         items += [
-            {"Delete": {"TableName": TABLE.name, "Key": {"pk": f"FAMILY#{family_id}", "sk": "META"}}},
+            {"Delete": {"TableName": TABLE.name, "Key": {"pk": f"FAMILY#{familyId}", "sk": "META"}}},
             {"Delete": {"TableName": TABLE.name, "Key": {"pk": f"INVITE#{family['inviteCode']}", "sk": "META"}}},
         ]
     elif family["ownerId"] == user_id:
         # Hand ownership to the longest-standing remaining member.
         items.append({"Update": {
-            "TableName": TABLE.name, "Key": {"pk": f"FAMILY#{family_id}", "sk": "META"},
+            "TableName": TABLE.name, "Key": {"pk": f"FAMILY#{familyId}", "sk": "META"},
             "UpdateExpression": "SET ownerId = :o", "ExpressionAttributeValues": {":o": others[0]["userId"]}}})
     transact(items, "Your family changed while leaving. Try again.")
-    return {"family": None}
+    return my_families_view({**profile, "familyIds": sorted(family_ids(profile) - {familyId})})
 
 
-@app.post("/families/mine/invite-code", response_model=Family, tags=["families"],
+@app.post("/families/{familyId}/invite-code", response_model=Family, tags=["families"],
           summary="Replace the invite code (owner only; the old code stops working)")
-def rotate_invite_code(profile: Writer):
-    family = require_family(profile, owner_only=True)
+def rotate_invite_code(familyId: str, profile: Writer):
+    family = require_family(profile, familyId, owner_only=True)
     code = new_invite_code()
     transact([
         {"Delete": {"TableName": TABLE.name, "Key": {"pk": f"INVITE#{family['inviteCode']}", "sk": "META"}}},
         {"Put": {"TableName": TABLE.name, "ConditionExpression": "attribute_not_exists(pk)", "Item": {
-            "pk": f"INVITE#{code}", "sk": "META", "familyId": family["familyId"]}}},
+            "pk": f"INVITE#{code}", "sk": "META", "familyId": familyId}}},
         {"Update": {"TableName": TABLE.name, "Key": {"pk": family["pk"], "sk": "META"},
                     "UpdateExpression": "SET inviteCode = :c", "ExpressionAttributeValues": {":c": code}}},
     ], "Could not create a new code. Try again.")
-    return family_view(family["familyId"], profile["userId"])
+    return family_view(familyId, profile["userId"])
 
 
-@app.delete("/families/mine/members/{userId}", response_model=Family, tags=["families"],
+@app.delete("/families/{familyId}/members/{userId}", response_model=Family, tags=["families"],
             summary="Remove a member (owner only)")
-def remove_member(userId: str, profile: Writer):
-    family = require_family(profile, owner_only=True)
+def remove_member(familyId: str, userId: str, profile: Writer):
+    family = require_family(profile, familyId, owner_only=True)
     if userId == profile["userId"]:
         raise ApiError(400, "Use 'leave family' to remove yourself.")
+    # The removed account may not have been upgraded from a single familyId yet.
+    upgrade_profile_by_id(userId)
     transact([
         {"Delete": {"TableName": TABLE.name, "Key": {"pk": family["pk"], "sk": f"MEMBER#{userId}"},
                     "ConditionExpression": "attribute_exists(pk)"}},
-        clear_family_on_profile(userId, family["familyId"]),
+        remove_family_from_profile(userId, familyId),
     ], "That account is not in your family.")
-    return family_view(family["familyId"], profile["userId"])
+    return family_view(familyId, profile["userId"])
+
+
+def upgrade_profile_by_id(user_id):
+    item = TABLE.get_item(Key={"pk": f"USER#{user_id}", "sk": "PROFILE"}).get("Item")
+    if item and "familyId" in item:
+        upgrade_single_family(item)
 
 
 # ---------- public (signed-out) routes ----------

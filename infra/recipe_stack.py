@@ -82,10 +82,13 @@ ROUTES = [
     ("/recipes/{id}/comments/{commentId}", "DELETE", True),
     ("/families", "POST", True),
     ("/families/mine", "GET", True),
+    ("/families/invite/{code}", "GET", True),
     ("/families/join", "POST", True),
-    ("/families/leave", "POST", True),
-    ("/families/mine/invite-code", "POST", True),
-    ("/families/mine/members/{userId}", "DELETE", True),
+    ("/families/{familyId}", "PUT", True),
+    ("/families/{familyId}/recipes", "GET", True),
+    ("/families/{familyId}/leave", "POST", True),
+    ("/families/{familyId}/invite-code", "POST", True),
+    ("/families/{familyId}/members/{userId}", "DELETE", True),
 ]
 
 

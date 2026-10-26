@@ -435,6 +435,7 @@ textarea { min-height: 130px; resize: vertical; }
 .recipe-title { font-size: 2.3rem; }
 .recipe-layout { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 20px; margin: 20px 0; }
 .recipe-layout .card, .grid .card { margin-bottom: 0; }
+.card > h2:first-child { margin-top: 0; }
 @media (max-width: 720px) { .recipe-layout { grid-template-columns: 1fr; } }
 .recipe-layout h2 { margin-top: 0; }
 .ingredients { list-style: none; padding: 0; margin: 0; }
@@ -498,6 +499,26 @@ html[data-decorations="off"] .auth-motif::before { content: "🍳"; }
 .member { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .member:last-child { border-bottom: none; }
 .invite-code { margin-bottom: 12px; }
+.invite-code .row { margin: 10px 0 6px; }
+.invite-code p[role="status"] { margin: 6px 0 0; min-height: 1.2em; }
+/* The code is a button: one click copies it. */
+button.code {
+  background: var(--accent-soft);
+  color: var(--text);
+  border: 1px dashed var(--accent-border);
+  border-radius: 10px;
+  padding: 4px 14px;
+}
+button.code:hover { border-style: solid; filter: none; }
+/* Off-screen field used by the copy fallback in app.js (a class, because the CSP blocks inline styles). */
+.copy-buffer { position: fixed; top: 0; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+.invite-link { font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; user-select: all; }
+
+.back-link { margin: 0 0 10px; font-size: 0.92rem; }
+.back-link a { text-decoration: none; }
+.title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.rename-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.rename-form input { flex: 1 1 220px; width: auto; font-size: 1.2rem; }
 .avatar {
   width: 34px; height: 34px; border-radius: 50%;
   display: inline-grid; place-items: center;

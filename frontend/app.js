@@ -196,14 +196,20 @@ async function signOut() {
 }
 
 // Pages that need an account send people to sign in, then back here.
-function requireSignIn() {
+function requireSignIn(message = "Please sign in to continue.") {
   session.set("returnTo", location.hash || "#/");
-  go("#/signin", "Please sign in to continue.");
+  go("#/signin", message);
 }
 
 // ---------- API ----------
 
+// Bumped by every route(). A page's data loads (GETs) that finish after you've
+// moved on to another page are dropped, so a slow page can't draw over a newer one.
+let routeSeq = 0;
+class StaleRoute extends Error {}
+
 async function api(path, { method = "GET", body } = {}) {
+  const seq = routeSeq;
   const token = await idToken();
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -213,6 +219,7 @@ async function api(path, { method = "GET", body } = {}) {
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (method === "GET" && seq !== routeSeq) throw new StaleRoute(`Dropped ${path}: the page changed.`);
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
   if (response.status === 429) {
@@ -299,24 +306,46 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest?.(".account")) closeAccountMenu();
 });
 
-function recipeCard(recipe, { badge = true } = {}) {
+// familyNames maps familyId -> name, so a family recipe's badge can say which family.
+function recipeCard(recipe, { badge = true, familyNames = {} } = {}) {
   return h("article", { class: "card recipe-card" },
     h("div", {},
       h("a", { class: "card-title", href: `#/recipe/${recipe.recipeId}`, text: recipe.title }),
-      badge && recipe.visibility === "family" ? [" ", h("span", { class: "badge", text: "Family only" })] : null),
+      badge && recipe.visibility === "family"
+        ? [" ", h("span", { class: "badge", text: familyNames[recipe.familyId] || "Family only" })] : null),
     h("div", { class: "muted", text: `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` }),
     recipe.description ? h("p", { class: "card-desc", text: recipe.description }) : null,
     h("div", { class: "muted", text: `${recipe.ingredients.length} ingredients · ${recipe.steps.length} steps` }),
   );
 }
 
-function recipeSection(title, subtitle, recipes, emptyState) {
+// cardOptions: by default the section heading says who can see the recipes, so cards skip the badge.
+function recipeSection(title, subtitle, recipes, emptyState, cardOptions = { badge: false }) {
   return h("section", { class: "feed-section", "aria-label": title },
     h("div", { class: "section-head" },
       h("h2", {}, title, " ", h("span", { class: "count", text: String(recipes.length) })),
       subtitle ? h("span", { class: "muted", text: subtitle }) : null),
-    // The section heading already says who can see them, so cards skip the badge.
-    recipes.length ? h("div", { class: "grid" }, recipes.map((r) => recipeCard(r, { badge: false }))) : emptyState);
+    recipes.length ? h("div", { class: "grid" }, recipes.map((r) => recipeCard(r, cardOptions))) : emptyState);
+}
+
+// ---------- families (shared by several pages) ----------
+
+const MAX_FAMILIES = 10;  // keep in sync with backend/recipe_api/main.py
+
+// The signed-in account's families, refreshed by pages that show them.
+let myFamilies = [];
+
+async function loadFamilies() {
+  myFamilies = me?.familyIds?.length ? (await api("/families/mine")).families : [];
+  return myFamilies;
+}
+
+function namesOf(families) {
+  return Object.fromEntries(families.map((family) => [family.familyId, family.name]));
+}
+
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
 async function feedView() {
@@ -328,21 +357,21 @@ async function feedView() {
           h("h1", { text: "Public recipes" }),
           h("div", { class: "muted", text: "Sign in to write recipes, comment, and share with your family." }))),
       recipes.length
-        ? h("div", { class: "grid" }, recipes.map(recipeCard))
+        ? h("div", { class: "grid" }, recipes.map((r) => recipeCard(r)))
         : h("div", { class: "empty" }, h("p", { text: "No recipes yet." })),
     );
   }
 
-  const [feed, familyData] = await Promise.all([
-    api("/recipes"),
-    me.familyId ? api("/families/mine") : Promise.resolve({ family: null }),
-  ]);
-  const family = familyData.family;
-  const familySection = family
-    ? recipeSection("Family recipes", `Only ${family.name} can see these`, feed.family,
+  const [feed, families] = await Promise.all([api("/recipes"), loadFamilies()]);
+  // Recipes from every family you're in; with more than one family, each card says which.
+  const familySection = families.length
+    ? recipeSection("Family recipes",
+        families.length === 1 ? `Only ${families[0].name} can see these` : `From your ${families.length} families`,
+        feed.family,
         h("div", { class: "empty" },
           h("p", { text: "No family recipes yet." }),
-          h("a", { class: "button", href: "#/new/family", text: "Share one with your family" })))
+          h("a", { class: "button", href: "#/new/family", text: "Share one with your family" })),
+        { badge: families.length > 1, familyNames: namesOf(families) })
     : recipeSection("Family recipes", null, [],
         h("div", { class: "card invite-card" },
           h("div", {},
@@ -394,8 +423,22 @@ function commentNode(recipe, comment) {
 
 async function recipeView(id) {
   const base = me ? `/recipes/${id}` : `/public/recipes/${id}`;
-  const [recipe, { comments }] = await Promise.all([api(base), api(`${base}/comments`)]);
+  const [recipe, { comments }, families] = await Promise.all([
+    api(base), api(`${base}/comments`), me ? loadFamilies() : [],
+  ]);
   const isAuthor = me && me.userId === recipe.authorId;
+  const familyName = namesOf(families)[recipe.familyId];
+
+  // Moves the recipe from its family to Public (the same as Edit > Who can see it > Public).
+  const publish = async () => {
+    const where = familyName ? `${familyName}'s recipes` : "family recipes";
+    if (!confirm(`Publish "${recipe.title}" to everyone?\n\nAnyone, signed in or not, will be able to see it ` +
+                 `and comment. It moves from ${where} to Public recipes, where your family can still see it. ` +
+                 "You can make it family-only again with Edit.")) return;
+    const { title, description, ingredients, steps } = recipe;
+    await api(`/recipes/${id}`, { method: "PUT", body: { title, description, ingredients, steps, visibility: "public" } });
+    go(`#/recipe/${id}`, "Published. Everyone can see this recipe now.");
+  };
 
   const commentBox = h("textarea", { maxlength: 2000, required: true, placeholder: "Share a tip or say thanks", "aria-label": "Comment" });
   const commentForm = me ? h("form", {
@@ -413,9 +456,13 @@ async function recipeView(id) {
     h("div", { class: "page-head" },
       h("div", {},
         h("h1", { class: "recipe-title" }, recipe.title,
-          recipe.visibility === "family" ? [" ", h("span", { class: "badge", text: "Family only" })] : null),
+          recipe.visibility === "family"
+            ? [" ", h("span", { class: "badge", text: familyName ? `Family only · ${familyName}` : "Family only" })]
+            : null),
         h("div", { class: "muted", text: `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` })),
       isAuthor ? h("div", { class: "row" },
+        recipe.visibility === "family"
+          ? h("button", { type: "button", class: "secondary", text: "Publish to public", onclick: publish }) : null,
         h("a", { class: "button", href: `#/edit/${id}`, text: "Edit" }),
         h("button", {
           class: "danger",
@@ -441,10 +488,11 @@ async function recipeView(id) {
   );
 }
 
-// defaults.visibility preselects who can see a new recipe (#/new/family picks "family").
+// defaults preselect who can see a new recipe: #/new/family picks your first
+// family, #/new/family/<familyId> that family.
 async function recipeFormView(id, defaults = {}) {
   if (!me) return requireSignIn();
-  const existing = id ? await api(`/recipes/${id}`) : null;
+  const [existing, families] = await Promise.all([id ? api(`/recipes/${id}`) : null, loadFamilies()]);
   const lines = (list) => (list || []).join("\n");
   const title = h("input", { maxlength: 120, required: true, value: existing?.title || "" });
   const description = h("textarea", { maxlength: 2000 });
@@ -453,11 +501,23 @@ async function recipeFormView(id, defaults = {}) {
   ingredients.value = lines(existing?.ingredients);
   const steps = h("textarea", { required: true, placeholder: "Preheat the oven to 350°F.\nWhisk the dry ingredients." });
   steps.value = lines(existing?.steps);
+  // Option values are "public" or "family:<familyId>".
+  const inFamily = (familyId) => families.some((f) => f.familyId === familyId);
+  const leftFamily = existing?.visibility === "family" && !inFamily(existing.familyId);
   const visibility = h("select", {},
     h("option", { value: "public", text: "Public: anyone can see it" }),
-    h("option", { value: "family", disabled: !me.familyId, text: me.familyId ? "Family only" : "Family only (join a family first)" }),
+    families.map((f) => h("option", { value: `family:${f.familyId}`, text: `Family only: ${f.name}` })),
+    // Kept selectable so saving doesn't silently make it public; the API asks for a family you're in.
+    leftFamily ? h("option", { value: `family:${existing.familyId}`, text: "Family only: a family you've left" }) : null,
+    families.length ? null : h("option", { value: "family", disabled: true, text: "Family only (join or start a family first)" }),
   );
-  visibility.value = existing?.visibility || (defaults.visibility === "family" && me.familyId ? "family" : "public");
+  if (existing) {
+    visibility.value = existing.visibility === "family" ? `family:${existing.familyId}` : "public";
+  } else if (inFamily(defaults.familyId)) {
+    visibility.value = `family:${defaults.familyId}`;
+  } else {
+    visibility.value = defaults.family && families.length ? `family:${families[0].familyId}` : "public";
+  }
   const toLines = (el) => el.value.split("\n").map((s) => s.trim()).filter(Boolean);
 
   render(
@@ -466,9 +526,10 @@ async function recipeFormView(id, defaults = {}) {
       class: "card",
       onsubmit: async (event) => {
         event.preventDefault();
+        const [who, familyId] = visibility.value.split(":");
         const body = {
           title: title.value, description: description.value,
-          ingredients: toLines(ingredients), steps: toLines(steps), visibility: visibility.value,
+          ingredients: toLines(ingredients), steps: toLines(steps), visibility: who, familyId: familyId || null,
         };
         const saved = existing
           ? await api(`/recipes/${id}`, { method: "PUT", body })
@@ -480,62 +541,181 @@ async function recipeFormView(id, defaults = {}) {
       h("label", {}, "Description", h("span", { class: "hint", text: "Optional. A line or two about the dish." }), description),
       h("label", {}, "Ingredients", h("span", { class: "hint", text: "One per line." }), ingredients),
       h("label", {}, "Steps", h("span", { class: "hint", text: "One per line; they're numbered for you." }), steps),
-      h("label", {}, "Who can see it", visibility),
+      h("label", {}, "Who can see it",
+        families.length > 1 ? h("span", { class: "hint", text: "A family recipe is seen only by the family you pick." }) : null,
+        visibility),
       h("div", {}, h("button", { type: "submit", text: existing ? "Save changes" : "Publish recipe" })),
     ),
   );
 }
 
-async function familyView() {
-  if (!me) return requireSignIn();
-  const [{ family }, feed] = await Promise.all([
-    api("/families/mine"),
-    me.familyId ? api("/recipes") : Promise.resolve({ family: [] }),
-  ]);
+// ---------- family pages ----------
 
-  if (!family) {
-    const name = h("input", { maxlength: 60, required: true, placeholder: "e.g. The Washingtons" });
-    const code = h("input", { maxlength: 20, required: true, placeholder: "8-character invite code" });
-    const after = async (promise) => { await promise; await loadMe(); renderNav(); route(); };
-    return render(
-      h("h1", { text: "Family" }),
-      h("p", { class: "muted", text: "A family links accounts together so you can share family-only recipes." }),
-      h("div", { class: "grid" },
-        h("div", { class: "card" }, h("h2", { text: "Start a family" }),
-          h("form", { onsubmit: (e) => { e.preventDefault(); after(api("/families", { method: "POST", body: { name: name.value } })); } },
-            h("label", {}, "Family name", name), h("div", {}, h("button", { type: "submit", text: "Create family" })))),
-        h("div", { class: "card" }, h("h2", { text: "Join a family" }),
-          h("form", { onsubmit: (e) => { e.preventDefault(); after(api("/families/join", { method: "POST", body: { inviteCode: code.value } })); } },
-            h("label", {}, "Invite code", code), h("div", {}, h("button", { type: "submit", text: "Join family" }))))),
-    );
+function inviteLink(code) {
+  return `${location.origin}${location.pathname}#/join/${code}`;
+}
+
+// Accepts a bare code or a pasted invite link.
+function inviteCodeFrom(text) {
+  return text.trim().split("/").pop().replace(/[^A-Za-z0-9]/g, "");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // No Clipboard API access (older browsers, some in-app browsers and frames):
+    // fall back to copying from a hidden, selected text field.
+    const focused = document.activeElement;
+    const buffer = h("textarea", { class: "copy-buffer", readonly: true, "aria-hidden": "true", tabindex: "-1" });
+    buffer.value = text;
+    document.body.append(buffer);
+    buffer.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch {}
+    buffer.remove();
+    focused?.focus?.();
+    return copied;
   }
+}
 
-  const isOwner = family.ownerId === me.userId;
+async function joinFamily(code) {
+  const family = await api("/families/join", { method: "POST", body: { inviteCode: code } });
+  await loadMe();
+  go(`#/family/${family.familyId}`, `You joined ${family.name}!`);
+}
+
+function familyCard(family) {
+  const names = family.members.map((m) => (m.userId === me.userId ? "You" : m.displayName));
+  return h("article", { class: "card recipe-card" },
+    h("div", {},
+      h("a", { class: "card-title", href: `#/family/${family.familyId}`, text: family.name }),
+      family.ownerId === me.userId ? [" ", h("span", { class: "badge", text: "Owner" })] : null),
+    h("div", { class: "muted", text: plural(family.members.length, "member") }),
+    h("p", { class: "card-desc", text: names.slice(0, 5).join(", ") + (names.length > 5 ? ", …" : "") }));
+}
+
+async function familiesView() {
+  if (!me) return requireSignIn();
+  const families = await loadFamilies();
+
+  const name = h("input", { maxlength: 60, required: true, placeholder: "e.g. The Washingtons" });
+  const code = h("input", { maxlength: 300, required: true, autocomplete: "off", placeholder: "8-character code, or the invite link" });
+  const startCard = h("div", { class: "card" }, h("h2", { text: "Start a family" }),
+    h("form", {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const family = await api("/families", { method: "POST", body: { name: name.value } });
+        await loadMe();
+        go(`#/family/${family.familyId}`, "Family created. Copy the invite link to add people.");
+      },
+    }, h("label", {}, "Family name", name), h("div", {}, h("button", { type: "submit", text: "Create family" }))));
+  const joinCard = h("div", { class: "card" }, h("h2", { text: "Join a family" }),
+    h("form", { onsubmit: (e) => { e.preventDefault(); joinFamily(inviteCodeFrom(code.value)); } },
+      h("label", {}, "Invite code or link", code), h("div", {}, h("button", { type: "submit", text: "Join family" }))));
+
   render(
     h("div", { class: "page-head" },
       h("div", {},
-        h("h1", { text: family.name }),
-        h("div", { class: "muted", text: `${family.members.length} ${family.members.length === 1 ? "member" : "members"}` })),
-      h("a", { class: "button", href: "#/new/family", text: "Share a family recipe" })),
-    recipeSection("Family recipes", `Only ${family.name} can see these`, feed.family,
+        h("h1", { text: families.length ? "Your families" : "Family" }),
+        h("div", { class: "muted", text: "A family links accounts so you can share recipes only they can see. You can be in more than one." }))),
+    families.length ? h("div", { class: "grid" }, families.map(familyCard)) : null,
+    families.length >= MAX_FAMILIES
+      ? h("p", { class: "muted", text: `You're in ${MAX_FAMILIES} families, the most allowed. Leave one to join or start another.` })
+      : [families.length ? h("h2", { text: "Join or start another family" }) : null,
+         h("div", { class: "grid" }, joinCard, startCard)],
+  );
+}
+
+async function familyDetailView(familyId) {
+  if (!me) return requireSignIn();
+  const families = await loadFamilies();
+  const family = families.find((f) => f.familyId === familyId);
+  if (!family) {
+    return render(
+      h("h1", { text: "Family not found" }),
+      h("p", { class: "muted", text: "You're not in this family, or it no longer exists." }),
+      h("p", {}, h("a", { href: "#/family", text: "← Your families" })));
+  }
+  const { recipes } = await api(`/families/${familyId}/recipes`);
+  const isOwner = family.ownerId === me.userId;
+  const others = family.members.filter((m) => m.userId !== me.userId);
+  const status = h("p", { class: "muted", role: "status" });
+
+  // Owners rename the family in place: the heading swaps for a small form.
+  const heading = h("div", { class: "title-row" },
+    h("h1", { text: family.name }),
+    isOwner ? h("button", { type: "button", class: "link", text: "Rename", onclick: () => startRename() }) : null);
+  function startRename() {
+    const input = h("input", { maxlength: 60, required: true, value: family.name, "aria-label": "Family name" });
+    const form = h("form", {
+      class: "rename-form",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        await api(`/families/${familyId}`, { method: "PUT", body: { name: input.value } });
+        go(location.hash, "Family name saved.");
+      },
+    }, input,
+      h("button", { type: "submit", text: "Save" }),
+      h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => form.replaceWith(heading) }));
+    heading.replaceWith(form);
+    input.select();
+  }
+
+  const copy = async (text, message) => {
+    status.textContent = (await copyText(text)) ? message : `Couldn't copy automatically. Select and copy it: ${text}`;
+  };
+  const link = family.inviteCode ? inviteLink(family.inviteCode) : null;
+  const inviteCard = isOwner ? h("div", { class: "card invite-code" },
+    h("div", { class: "muted", text: "Invite people with the code or the link. Click the code to copy it." }),
+    h("div", { class: "row" },
+      h("button", {
+        type: "button", class: "code", text: family.inviteCode, "aria-label": `Copy invite code ${family.inviteCode}`,
+        onclick: () => copy(family.inviteCode, "Invite code copied."),
+      }),
+      h("button", { type: "button", text: "Copy invite link", onclick: () => copy(link, "Invite link copied. Paste it into a text or email.") }),
+      // Phones get the system share sheet (Messages, WhatsApp, email...).
+      navigator.share ? h("button", {
+        type: "button", class: "secondary", text: "Share…",
+        onclick: () => navigator.share({ title: `Join ${family.name} on Family Foodie Book`, url: link }).catch(() => {}),
+      }) : null,
+      h("button", {
+        type: "button", class: "link", text: "Make a new code",
+        onclick: async () => {
+          if (!confirm("The old code and link will stop working. Continue?")) return;
+          const updated = await api(`/families/${familyId}/invite-code`, { method: "POST" });
+          const copied = await copyText(updated.inviteCode);
+          go(location.hash, copied ? "New code made and copied. The old code and link no longer work."
+                                   : "New code made. The old code and link no longer work.");
+        },
+      })),
+    h("div", { class: "invite-link", text: link }),
+    status) : null;
+
+  const leave = async () => {
+    const next = others.length ? [...others].sort((a, b) => a.joinedAt.localeCompare(b.joinedAt))[0] : null;
+    const consequence = !next
+      ? "You're the last member, so the family and its invite code will be deleted."
+      : isOwner ? `${next.displayName} will become the owner.` : "";
+    if (!confirm(`Leave ${family.name}? Its family-only recipes will no longer be visible to you. ${consequence}`)) return;
+    await api(`/families/${familyId}/leave`, { method: "POST" });
+    await loadMe();
+    go("#/family", `You left ${family.name}.`);
+  };
+
+  render(
+    h("p", { class: "back-link" }, h("a", { href: "#/family", text: "← Your families" })),
+    h("div", { class: "page-head" },
+      h("div", {}, heading, h("div", { class: "muted", text: plural(family.members.length, "member") })),
+      h("a", { class: "button", href: `#/new/family/${familyId}`, text: "Share a family recipe" })),
+    recipeSection("Family recipes", `Only ${family.name} can see these`, recipes,
       h("div", { class: "empty" },
         h("p", { text: "No family recipes yet." }),
-        h("a", { class: "button", href: "#/new/family", text: "Share the first one" }))),
+        h("a", { class: "button", href: `#/new/family/${familyId}`, text: "Share the first one" }))),
     h("h2", { text: `Members (${family.members.length})` }),
     // Only the owner gets the invite code back from the API (inviteCode is null for everyone else).
-    isOwner ? h("div", { class: "card invite-code" },
-      h("div", { class: "muted", text: "Share this invite code with family members:" }),
-      h("div", { class: "row" },
-        h("span", { class: "code", text: family.inviteCode }),
-        h("button", {
-          class: "secondary",
-          text: "Make a new code",
-          onclick: async () => {
-            if (!confirm("The old code will stop working. Continue?")) return;
-            await api("/families/mine/invite-code", { method: "POST" });
-            route();
-          },
-        }))) : null,
+    inviteCard,
     h("div", { class: "card" }, family.members.map((member) => h("div", { class: "member" },
       h("div", {},
         avatar(member.displayName),
@@ -546,24 +726,37 @@ async function familyView() {
         class: "danger",
         text: "Remove",
         onclick: async () => {
-          if (!confirm(`Remove ${member.displayName} from the family?`)) return;
-          await api(`/families/mine/members/${member.userId}`, { method: "DELETE" });
+          if (!confirm(`Remove ${member.displayName} from ${family.name}?`)) return;
+          await api(`/families/${familyId}/members/${member.userId}`, { method: "DELETE" });
           route();
         },
       }) : null,
     ))),
-    h("p", {}, h("button", {
-      class: "danger",
-      text: "Leave family",
-      onclick: async () => {
-        if (!confirm("Leave this family? Family-only recipes will no longer be visible to you.")) return;
-        await api("/families/leave", { method: "POST" });
-        await loadMe();
-        renderNav();
-        route();
-      },
-    })),
+    h("p", {}, h("button", { class: "danger", text: "Leave family", onclick: leave })),
   );
+}
+
+// Where an invite link lands: #/join/<code>.
+async function joinView(code) {
+  if (!me) return requireSignIn("Sign in or create an account to join the family.");
+  let preview;
+  try {
+    preview = await api(`/families/invite/${encodeURIComponent(code)}`);
+  } catch (error) {
+    return render(authPage("This invite isn't valid",
+      `${error.message} Ask the family's owner for a new link.`,
+      h("p", { class: "auth-switch" }, h("a", { href: "#/family", text: "Go to your families" }))));
+  }
+  if (preview.alreadyMember) return go(`#/family/${preview.familyId}`, `You're already in ${preview.name}.`);
+  const button = h("button", { type: "button", text: `Join ${preview.name}` });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try { await joinFamily(code); } finally { button.disabled = false; }
+  });
+  render(authPage(`Join ${preview.name}?`,
+    `You've been invited to ${preview.name} (${plural(preview.memberCount, "member")}). ` +
+    "Members can see each other's family-only recipes. You stay in any other families you're in.",
+    h("div", { class: "row" }, button, h("a", { href: "#/", text: "Not now" }))));
 }
 
 async function profileView() {
@@ -1005,10 +1198,11 @@ function forgotView() {
 // ---------- routing ----------
 
 async function route() {
+  routeSeq += 1;
   showNotice(flashMessage);
   flashMessage = "";
   renderNav();
-  const [, page, id] = (location.hash || "#/").split("/");
+  const [, page, id, extra] = (location.hash || "#/").split("/");
   view.classList.toggle("narrow", ["new", "edit", "profile"].includes(page));
   try {
     if (page === "signin") signInView();
@@ -1016,19 +1210,22 @@ async function route() {
     else if (page === "confirm") confirmView();
     else if (page === "forgot") forgotView();
     else if (page === "recipe" && id) await recipeView(id);
-    else if (page === "new") await recipeFormView(null, { visibility: id === "family" ? "family" : "public" });
+    else if (page === "new") await recipeFormView(null, { family: id === "family", familyId: extra });
     else if (page === "edit" && id) await recipeFormView(id);
-    else if (page === "family") await familyView();
+    else if (page === "family" && id) await familyDetailView(id);
+    else if (page === "family") await familiesView();
+    else if (page === "join" && id) await joinView(decodeURIComponent(id));
     else if (page === "profile") await profileView();
     else if (page === "appearance") appearanceView();
     else await feedView();
   } catch (error) {
-    showNotice(error.message);
+    if (!(error instanceof StaleRoute)) showNotice(error.message);
   }
 }
 
 // Errors thrown from form and button handlers end up here.
 window.addEventListener("unhandledrejection", (event) => {
+  if (event.reason instanceof StaleRoute) return event.preventDefault();
   showNotice(event.reason?.message || "Something went wrong.");
 });
 
