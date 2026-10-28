@@ -154,8 +154,10 @@ class RecipeBookStack(Stack):
                     sort_key=dynamodb.Attribute(name="gsi1sk", type=dynamodb.AttributeType.STRING),
                 ),
                 # "My recipes". Keyed on attributes every recipe already has, so DynamoDB fills
-                # it in for existing recipes when it's added (CloudFormation adds one index per
-                # deploy). Add any further index in a deploy of its own.
+                # it in for existing recipes when it's added. Add any further index in a deploy
+                # of its own (CloudFormation adds one per deploy), and ship the code that queries
+                # it only once the index is ACTIVE: CloudFormation finishes before the backfill
+                # does, and queries fail until then. See docs/operations.md, "Changing the database".
                 dynamodb.GlobalSecondaryIndexPropsV2(
                     index_name="byAuthor",
                     partition_key=dynamodb.Attribute(name="authorId", type=dynamodb.AttributeType.STRING),

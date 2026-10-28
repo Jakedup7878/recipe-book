@@ -56,6 +56,29 @@ There are 66 tests: API behavior, route parity between the gateway and FastAPI, 
 - If a run fails, open the failed stage's CodeBuild log. Test failures appear in the *Reports* tab too.
 - Changes to `infra/pipeline_stack.py` aren't deployed by the pipeline. Deploy them by hand: `cd infra; npx cdk deploy RecipeBookPipeline --profile recipe-book`.
 
+### Changing the database (indexes and keys)
+
+The table holds real data and is RETAINed, so table changes need more care than code changes.
+
+**Adding an index takes two deploys:** the index first, then the code that reads it.
+1. **First push: the index only.** Add it in `infra/recipe_stack.py`, and in `backend/devtools.py` so the tests' table matches; `test_recipe_stack.py` lists the expected indexes. Review the diff: the table should show `[~]` (changed in place), never a replacement. Approve.
+2. **Wait until the index is `ACTIVE`.** CloudFormation reports success while DynamoDB is still filling the index with existing items ("backfilling"), and until that finishes, any query on it fails. Check with:
+
+   ```bash
+   aws dynamodb describe-table --table-name RecipeBook-TableCD117FA1-F6S0IFRUF779 --query "Table.GlobalSecondaryIndexes[].[IndexName,IndexStatus,Backfilling]" --profile recipe-book --region us-east-2
+   ```
+
+   It's ready when the index shows `ACTIVE` with no `Backfilling` value. That took about 7 minutes for 4 recipes; it takes longer as the table grows.
+3. **Second push: the code that queries it.**
+
+Why: on 2026-10-27 the `byAuthor` index and the "My recipes" code shipped in one deploy. For about 7 minutes, My recipes returned errors ("Cannot read from backfilling global secondary index") until the index was ready.
+
+**Other rules:**
+- **One index added or removed per deploy.** That's a CloudFormation limit for this table type.
+- **Removing an index is the reverse order:** first ship code that no longer uses it, then remove the index.
+- **Never change the table's primary key** (`pk`, `sk`), its name or its billing setup in a way the diff shows as a replacement. CloudFormation would create a new, empty table, and RETAIN would leave the old one, with all the data, disconnected. Reject the approval if you see that.
+- **Prefer index keys that existing items already have.** `byAuthor` uses `authorId` and `createdAt`, so DynamoDB filled it in for old recipes automatically. A brand-new attribute would need a backfill script first.
+
 ## 5. Deploy from scratch (a new AWS account or Region)
 
 1. Complete the setup in §1.
@@ -146,7 +169,9 @@ Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico` r
 | `EPERM` errors from `cdk synth` locally | OneDrive locks files in `infra\cdk.out` while syncing | Synthesize to a folder outside OneDrive: `npx cdk synth --output <a temp folder>` |
 | `git commit -m "…"` cuts the message at quotes in PowerShell 5.1 | PowerShell passes quoted text to Git incorrectly | Write the message to a file and use `git commit -F <file>` |
 | An AWS command in Git Bash says a log group "doesn't exist" | Git Bash rewrites `/aws/...` into a Windows path | Run it with `MSYS_NO_PATHCONV=1`, or use PowerShell |
-| `ExpiredToken` / "credentials expired" | The `aws login` session ended | Run `aws login --profile recipe-book` again |
+| `ExpiredToken` / "credentials expired" / "Your session has expired" | The `aws login` session ended | Run `aws login --profile recipe-book` again. If it then says "The pending authorization … has expired", the browser step took too long; run it again, and it finishes at once while you're still signed in to AWS in the browser. |
+| A page errors right after a deploy; the Lambda log says "Cannot read from backfilling global secondary index" | A new index is still being built (CloudFormation finishes before DynamoDB does) | Wait for the index to show `ACTIVE` (see §4, *Changing the database*). Next time, deploy the index before the code that uses it. |
+| `aws cloudformation describe-stack-resources` doesn't list a resource you know exists | That command returns at most 100 resources, and this stack has more | Use `aws cloudformation list-stack-resources`, which pages through all of them |
 | Push to GitHub asks for credentials or fails | A stale stored credential | Push from a terminal; Git Credential Manager opens a browser sign-in |
 | Local server won't start: port in use | An old server process is still running | Stop it, or set `$env:PORT` to another port |
 | Console shows `403 /something` on the live site | The file doesn't exist (private S3 answers 403 for missing files) | Add the file to `frontend/`; `test_frontend.py` checks linked files exist |

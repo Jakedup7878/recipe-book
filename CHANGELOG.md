@@ -60,6 +60,13 @@ Notable changes to Recipe Book. Newest first.
   - As Bob, in only one of the families: he saw only "The Washingtons", with no sharing panel.
   - The recipe form at 375 px in light mode, with no sideways scrolling.
 
+### Deploy note
+
+- Run 9982fcf1 finished at 23:27, but DynamoDB was still building the new `byAuthor` index until **23:34**.
+- In between, My recipes returned an error, and the Lambda logged two failed loads, at 23:32 and 23:33 ("Cannot read from backfilling global secondary index").
+- Nothing else was affected. Once active, the index held all 4 recipes.
+- From now on, a new index ships in a deploy of its own, before the code that queries it. See [docs/operations.md](docs/operations.md) §4, "Changing the database".
+
 ## 2026-10-26 (later): support@ receives mail
 
 ### What changed
