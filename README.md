@@ -13,6 +13,7 @@ This is the starting point. The details are in [`docs/`](docs/):
 | [docs/plans/world-meal-of-the-week.md](docs/plans/world-meal-of-the-week.md) | Plan: a weekly meal plan from a randomly chosen country |
 | [docs/plans/email-with-ses.md](docs/plans/email-with-ses.md) | Plan: sending the site's email through Amazon SES |
 | [docs/plans/monetization.md](docs/plans/monetization.md) | Plan: making money, plus the AWS and payment services it needs |
+| [docs/plans/beta-and-walk-with-me.md](docs/plans/beta-and-walk-with-me.md) | Plan: a beta branch and environment, then the "Walk with me" step-by-step cooking mode with timers |
 | [CHANGELOG.md](CHANGELOG.md) | What changed, and when |
 
 ## What it does
