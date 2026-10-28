@@ -22,12 +22,18 @@ def create_table(table_name):
     boto3.client("dynamodb").create_table(
         TableName=table_name,
         BillingMode="PAY_PER_REQUEST",
-        AttributeDefinitions=[{"AttributeName": n, "AttributeType": "S"} for n in ("pk", "sk", "gsi1pk", "gsi1sk")],
+        AttributeDefinitions=[{"AttributeName": n, "AttributeType": "S"}
+                              for n in ("pk", "sk", "gsi1pk", "gsi1sk", "authorId", "createdAt")],
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
         GlobalSecondaryIndexes=[{
             "IndexName": "gsi1",
             "KeySchema": [{"AttributeName": "gsi1pk", "KeyType": "HASH"},
                           {"AttributeName": "gsi1sk", "KeyType": "RANGE"}],
+            "Projection": {"ProjectionType": "ALL"},
+        }, {
+            "IndexName": "byAuthor",
+            "KeySchema": [{"AttributeName": "authorId", "KeyType": "HASH"},
+                          {"AttributeName": "createdAt", "KeyType": "RANGE"}],
             "Projection": {"ProjectionType": "ALL"},
         }],
     )

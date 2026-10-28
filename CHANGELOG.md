@@ -2,6 +2,64 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-27: Share a recipe with several families; My recipes
+
+### What changed for people using the site
+
+1. **Share to Public / Share to Family on your own recipes.**
+   - Your recipe's page has a **"Who can see this"** panel, which says whether the recipe is public or which families it's shared with.
+   - **Share to Public** moves it out of its families into Public recipes, after a site-styled confirmation. This replaces the old "Publish to public" button.
+   - **Share to Family** opens a dialog of styled checkboxes, one per family with its member count. Your current families are already ticked.
+     - The button keeps count ("Share with 2 families") and is disabled until at least one family is ticked.
+     - Families you've left that the recipe is still shared with are listed as "A family you've left", so you can untick them.
+     - A public recipe shared this way becomes family-only.
+2. **One recipe, several families.**
+   - Members of each family you pick see the recipe and all of its comments, including comments from the other families.
+   - They only ever see the names of *their own* families on it. Only you see the full list.
+   - If you're in more than one of those families, Home still lists the recipe once.
+3. **My recipes**, a new top-bar link between Home and Family (`#/mine`). It has two sections:
+   - **Shared with family**: your family-only recipes.
+   - **All my recipes**: everything you've written, each card labeled Public or with its families.
+4. **Family-only recipes have their own color, wherever they're listed**, including Home, a family's page and My recipes:
+   - a tinted card with a colored left edge, and a matching badge and section marker;
+   - the color is a hue apart from each season's accent: green in fall, plum in winter, teal-blue in spring, berry in summer, with lighter versions in dark mode;
+   - every one is checked to at least 4.5:1 contrast (WCAG AA) for small text.
+5. **The recipe form's "Who can see it"** is now two choice cards, **Public** and **Family only**, with the same family checklist under Family only. It replaces the one-family dropdown.
+6. **The Privacy Policy and Terms of Service** (effective October 27, 2026) now say:
+   - recipes can be shared with several families;
+   - comments are visible across those families;
+   - other families' names aren't shown;
+   - you can stop sharing with a family you've left.
+
+### How it works
+
+- **New routes.** Both are signed in and added to API Gateway:
+  - `GET /me/recipes`;
+  - `PUT /recipes/{id}/sharing`, with `{visibility, familyIds}`, author only.
+- **Recipe changes.** `PUT /recipes/{id}` and `POST /recipes` take `familyIds` (a list) instead of `familyId`. The old field is still accepted, for browsers with a cached copy of the old app. Responses return `familyIds`, trimmed to the viewer's own families unless they're the author.
+- **Share items.** Each family a recipe is shared with gets a `RECIPE#<id> / SHARE#<familyId>` item that puts it in that family's feed. It holds no recipe data.
+  - Writing a recipe and its share items is one transaction.
+  - Feeds re-read each recipe and check its sharing again, so a leftover share can't leak it.
+- **A new index, `byAuthor`** (`authorId`, `createdAt`), for My recipes. DynamoDB fills it in for existing recipes automatically.
+- **Recipes saved before this change keep working** (one `familyId`, in the feed themselves). They switch to the new layout the next time their author edits or shares them.
+- Details and trade-offs are in [docs/architecture.md](docs/architecture.md) (data model, and decisions 17 and 18).
+
+### Tests
+
+- New handler tests:
+  - sharing with several families: author-only, your own families, listed once, names hidden from other families, unsharing, families you've left, Share to Public, delete;
+  - My recipes;
+  - old one-family recipes, read and upgraded.
+- Updated tests for the `familyIds` field.
+- The local sample data shares Alice's pie with both her families, and the restart test checks that it's listed once.
+- New: `test_table_indexes_match_what_the_api_queries` (infra) and `test_every_page_link_goes_to_a_page_the_router_handles` (frontend).
+- Full suite: 71 passed.
+- Manual checks on the local dev server, using data saved before this change:
+  - My recipes showed the old-format pie as a family card.
+  - Share to Family: ticks, the count on the button, disabled with nothing ticked, sharing with two families.
+  - As Bob, in only one of the families: he saw only "The Washingtons", with no sharing panel.
+  - The recipe form at 375 px in light mode, with no sideways scrolling.
+
 ## 2026-10-26 (later): support@ receives mail
 
 ### What changed

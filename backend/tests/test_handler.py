@@ -198,10 +198,10 @@ def test_accounts_can_join_several_families(api, monkeypatch):
     assert [f["name"] for f in mine["families"]] == ["Bob's Bakes", "Riveras", "Washingtons"]
     assert sorted(call(api, "GET /me", "bob")[1]["familyIds"]) == sorted(f["familyId"] for f in mine["families"])
 
-    # Each family recipe belongs to one family; Bob sees both on his home feed, newest first.
+    # In one family, a family recipe goes to it; Bob sees both on his home feed, newest first.
     _, pie = call(api, "POST /recipes", "alice", {**RECIPE, "title": "Pie", "visibility": "family"})
     _, tamales = call(api, "POST /recipes", "carol", {**RECIPE, "title": "Tamales", "visibility": "family"})
-    assert pie["familyId"] == washingtons["familyId"] and tamales["familyId"] == riveras["familyId"]
+    assert pie["familyIds"] == [washingtons["familyId"]] and tamales["familyIds"] == [riveras["familyId"]]
     _, feed = call(api, "GET /recipes", "bob")
     assert [r["title"] for r in feed["family"]] == ["Tamales", "Pie"]
     assert [r["title"] for r in call(api, "GET /recipes", "alice")[1]["family"]] == ["Pie"]
@@ -212,15 +212,20 @@ def test_accounts_can_join_several_families(api, monkeypatch):
     assert [r["title"] for r in listed["recipes"]] == ["Tamales"]
     assert call(api, "GET /families/{familyId}/recipes", "alice", familyId=riveras["familyId"])[0] == 404
 
-    # In several families, a family recipe must say which one; it must be one of yours.
+    # In several families, a family recipe must say which ones; they must be yours.
     family_recipe = {**RECIPE, "visibility": "family"}
     assert call(api, "POST /recipes", "bob", family_recipe)[0] == 400
-    assert call(api, "POST /recipes", "bob", {**family_recipe, "familyId": "not-mine"})[0] == 400
-    status, shared = call(api, "POST /recipes", "bob", {**family_recipe, "familyId": riveras["familyId"]})
-    assert status == 201 and shared["familyId"] == riveras["familyId"]
-    # Editing it without naming a family keeps it where it is.
+    assert call(api, "POST /recipes", "bob", {**family_recipe, "familyIds": ["not-mine"]})[0] == 400
+    assert call(api, "POST /recipes", "bob", {**family_recipe, "familyIds": []})[0] == 400
+    status, shared = call(api, "POST /recipes", "bob", {**family_recipe, "familyIds": [riveras["familyId"]]})
+    assert status == 201 and shared["familyIds"] == [riveras["familyId"]]
+    # The older one-family field still works.
+    status, older = call(api, "POST /recipes", "bob", {**family_recipe, "familyId": riveras["familyId"]})
+    assert status == 201 and older["familyIds"] == [riveras["familyId"]]
+    call(api, "DELETE /recipes/{id}", "bob", id=older["recipeId"])
+    # Editing it without naming families keeps it where it is.
     _, edited = call(api, "PUT /recipes/{id}", "bob", {**family_recipe, "title": "Better"}, id=shared["recipeId"])
-    assert edited["familyId"] == riveras["familyId"] and edited["title"] == "Better"
+    assert edited["familyIds"] == [riveras["familyId"]] and edited["title"] == "Better"
 
     # Leaving one family keeps the others.
     call(api, "POST /families/{familyId}/leave", "bob", familyId=washingtons["familyId"])
@@ -269,11 +274,128 @@ def test_author_can_publish_a_family_recipe(api):
     assert call(api, "PUT /recipes/{id}", "bob", {**RECIPE, "visibility": "public"}, id=rid)[0] == 403
 
     status, published = call(api, "PUT /recipes/{id}", "alice", {**RECIPE, "visibility": "public"}, id=rid)
-    assert status == 200 and published["visibility"] == "public" and published["familyId"] is None
+    assert status == 200 and published["visibility"] == "public" and published["familyIds"] == []
     assert [r["recipeId"] for r in call(api, "GET /public/recipes")[1]["recipes"]] == [rid]
     _, feed = call(api, "GET /recipes", "bob")
     assert feed["family"] == [] and [r["recipeId"] for r in feed["public"]] == [rid]
     assert call(api, "GET /families/{familyId}/recipes", "bob", familyId=family["familyId"])[1]["recipes"] == []
+
+
+def test_author_shares_a_recipe_with_several_families(api, monkeypatch):
+    ticks = iter(range(10, 60))
+    monkeypatch.setattr(api, "now_iso", lambda: f"2026-10-27T12:00:{next(ticks)}+00:00")
+    _, washingtons = call(api, "POST /families", "alice", {"name": "Washingtons"})
+    _, riveras = call(api, "POST /families", "carol", {"name": "Riveras"})
+    _, bakers = call(api, "POST /families", "dana", {"name": "Bakers"})
+    w, r, b = washingtons["familyId"], riveras["familyId"], bakers["familyId"]
+    for code in (riveras["inviteCode"], bakers["inviteCode"]):
+        call(api, "POST /families/join", "alice", {"inviteCode": code})
+    call(api, "POST /families/join", "bob", {"inviteCode": washingtons["inviteCode"]})
+    call(api, "POST /families/join", "bob", {"inviteCode": riveras["inviteCode"]})
+
+    _, pie = call(api, "POST /recipes", "alice", {**RECIPE, "title": "Pie", "visibility": "family", "familyIds": [w]})
+    rid = pie["recipeId"]
+    sharing = lambda user, body: call(api, "PUT /recipes/{id}/sharing", user, body, id=rid)  # noqa: E731
+
+    # Only the author can share, and only with families they're in.
+    assert sharing("bob", {"visibility": "family", "familyIds": [w, r]})[0] == 403
+    assert sharing("alice", {"visibility": "family", "familyIds": [w, "not-mine"]})[0] == 400
+    assert sharing("alice", {"visibility": "family", "familyIds": []})[0] == 400
+    status, shared = sharing("alice", {"visibility": "family", "familyIds": [w, r]})
+    assert status == 200 and shared["familyIds"] == sorted([w, r])
+
+    # Each family sees it, and Bob (in both) gets it once on his home feed.
+    for family_id in (w, r):
+        listed = call(api, "GET /families/{familyId}/recipes", "bob", familyId=family_id)[1]["recipes"]
+        assert [x["recipeId"] for x in listed] == [rid]
+    assert [x["recipeId"] for x in call(api, "GET /recipes", "bob")[1]["family"]] == [rid]
+    assert call(api, "GET /recipes/{id}", "carol", id=rid)[0] == 200  # a Rivera, not a Washington
+    assert call(api, "GET /recipes/{id}", "dana", id=rid)[0] == 404  # Bakers weren't picked
+    assert call(api, "GET /families/{familyId}/recipes", "dana", familyId=b)[1]["recipes"] == []
+
+    # Members only learn about their own families; the author sees them all.
+    assert call(api, "GET /recipes/{id}", "carol", id=rid)[1]["familyIds"] == [r]
+    assert call(api, "GET /recipes/{id}", "bob", id=rid)[1]["familyIds"] == sorted([w, r])
+    assert call(api, "GET /recipes/{id}", "alice", id=rid)[1]["familyIds"] == sorted([w, r])
+
+    # Unsharing removes it from that family's feed.
+    sharing("alice", {"visibility": "family", "familyIds": [r]})
+    assert call(api, "GET /families/{familyId}/recipes", "bob", familyId=w)[1]["recipes"] == []
+    assert call(api, "GET /recipes/{id}", "carol", id=rid)[0] == 200
+    stored = {i["sk"] for i in api.TABLE.query(KeyConditionExpression=api.Key("pk").eq(f"RECIPE#{rid}"))["Items"]}
+    assert stored == {"META", f"SHARE#{r}"}
+
+    # After the author leaves a family, the share can stay or be dropped, but not be added back.
+    call(api, "POST /families/{familyId}/leave", "alice", familyId=r)
+    assert sharing("alice", {"visibility": "family", "familyIds": [r, b]})[1]["familyIds"] == sorted([r, b])
+    assert sharing("alice", {"visibility": "family", "familyIds": [b]})[1]["familyIds"] == [b]
+    assert sharing("alice", {"visibility": "family", "familyIds": [r]})[0] == 400
+
+    # Sharing to public takes it out of every family feed and into the public one.
+    status, public = sharing("alice", {"visibility": "public"})
+    assert status == 200 and public["visibility"] == "public" and public["familyIds"] == []
+    assert call(api, "GET /families/{familyId}/recipes", "dana", familyId=b)[1]["recipes"] == []
+    assert [x["recipeId"] for x in call(api, "GET /public/recipes")[1]["recipes"]] == [rid]
+    # Deleting removes the recipe with its comments and shares.
+    sharing("alice", {"visibility": "family", "familyIds": [w, b]})
+    call(api, "POST /recipes/{id}/comments", "bob", {"text": "Yum"}, id=rid)
+    assert call(api, "DELETE /recipes/{id}", "alice", id=rid)[0] == 204
+    assert api.TABLE.query(KeyConditionExpression=api.Key("pk").eq(f"RECIPE#{rid}"))["Items"] == []
+
+
+def test_my_recipes_lists_everything_i_wrote(api, monkeypatch):
+    ticks = iter(range(10, 60))
+    monkeypatch.setattr(api, "now_iso", lambda: f"2026-10-27T12:00:{next(ticks)}+00:00")
+    _, family = call(api, "POST /families", "alice", {"name": "Washingtons"})
+    call(api, "POST /families/join", "bob", {"inviteCode": family["inviteCode"]})
+    _, soup = call(api, "POST /recipes", "alice", {**RECIPE, "title": "Soup"})
+    _, pie = call(api, "POST /recipes", "alice", {**RECIPE, "title": "Pie", "visibility": "family"})
+    call(api, "POST /recipes", "bob", {**RECIPE, "title": "Bob's bread"})
+    call(api, "POST /recipes/{id}/comments", "alice", {"text": "Mine!"}, id=soup["recipeId"])  # not a recipe
+
+    status, mine = call(api, "GET /me/recipes", "alice")
+    assert status == 200
+    assert [(x["title"], x["visibility"]) for x in mine["recipes"]] == [("Pie", "family"), ("Soup", "public")]
+    assert mine["recipes"][0]["familyIds"] == [family["familyId"]]
+    # Still listed after leaving the family it was shared with.
+    call(api, "POST /families/{familyId}/leave", "alice", familyId=family["familyId"])
+    assert [x["recipeId"] for x in call(api, "GET /me/recipes", "alice")[1]["recipes"]] == [pie["recipeId"],
+                                                                                          soup["recipeId"]]
+    assert [x["title"] for x in call(api, "GET /me/recipes", "bob")[1]["recipes"]] == ["Bob's bread"]
+    assert call(api, "GET /me/recipes", "carol")[1]["recipes"] == []
+
+
+def test_recipes_saved_with_one_family_still_work_and_upgrade(api):
+    # Before recipes could go to several families, a family recipe held one familyId and
+    # sat in that family's feed itself (gsi1pk = FAMILYFEED#<id>), with no SHARE item.
+    _, family = call(api, "POST /families", "alice", {"name": "Washingtons"})
+    fid = family["familyId"]
+    call(api, "POST /families/join", "bob", {"inviteCode": family["inviteCode"]})
+    _, other = call(api, "POST /families", "alice", {"name": "Riveras"})
+    api.TABLE.put_item(Item={
+        "pk": "RECIPE#old", "sk": "META", "recipeId": "old", **RECIPE, "description": "",
+        "visibility": "family", "familyId": fid, "authorId": "alice", "authorName": "alice",
+        "createdAt": "2026-10-01T00:00:00+00:00", "updatedAt": "2026-10-01T00:00:00+00:00",
+        "gsi1pk": f"FAMILYFEED#{fid}", "gsi1sk": "2026-10-01T00:00:00+00:00#old"})
+
+    assert [x["recipeId"] for x in call(api, "GET /families/{familyId}/recipes", "bob", familyId=fid)[1]["recipes"]] \
+        == ["old"]
+    assert call(api, "GET /recipes/{id}", "bob", id="old")[1]["familyIds"] == [fid]
+    assert [x["recipeId"] for x in call(api, "GET /me/recipes", "alice")[1]["recipes"]] == ["old"]
+
+    # Editing keeps it in its family and moves it to the new layout.
+    _, edited = call(api, "PUT /recipes/{id}", "alice", {**RECIPE, "title": "Old pie", "visibility": "family"},
+                     id="old")
+    assert edited["familyIds"] == [fid]
+    stored = api.TABLE.get_item(Key={"pk": "RECIPE#old", "sk": "META"})["Item"]
+    assert "familyId" not in stored and "gsi1pk" not in stored and stored["familyIds"] == {fid}
+    assert api.TABLE.get_item(Key={"pk": "RECIPE#old", "sk": f"SHARE#{fid}"})["Item"]["gsi1pk"] == \
+        f"FAMILYFEED#{fid}"
+    assert [x["title"] for x in call(api, "GET /recipes", "bob")[1]["family"]] == ["Old pie"]
+    # Sharing it with a second family works like any other recipe.
+    _, shared = call(api, "PUT /recipes/{id}/sharing", "alice",
+                     {"visibility": "family", "familyIds": [fid, other["familyId"]]}, id="old")
+    assert shared["familyIds"] == sorted([fid, other["familyId"]])
 
 
 def test_single_family_profiles_are_upgraded(api):

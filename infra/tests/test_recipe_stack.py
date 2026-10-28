@@ -35,6 +35,18 @@ def test_table_and_user_pool_are_retained():
         assert resource["UpdateReplacePolicy"] == "Retain", resource_type
 
 
+def test_table_indexes_match_what_the_api_queries():
+    # backend/recipe_api/main.py queries these by name. CloudFormation can add only one
+    # index per deploy, so a change here should add (or remove) a single index at a time.
+    table = next(iter(template().find_resources("AWS::DynamoDB::GlobalTable").values()))["Properties"]
+    indexes = {i["IndexName"]: [(k["AttributeName"], k["KeyType"]) for k in i["KeySchema"]]
+               for i in table["GlobalSecondaryIndexes"]}
+    assert indexes == {
+        "gsi1": [("gsi1pk", "HASH"), ("gsi1sk", "RANGE")],
+        "byAuthor": [("authorId", "HASH"), ("createdAt", "RANGE")],
+    }
+
+
 def test_without_a_domain_the_site_uses_the_cloudfront_address():
     t = template()
     t.resource_count_is("AWS::Route53::RecordSet", 0)

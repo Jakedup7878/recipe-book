@@ -127,8 +127,10 @@ def seed(app, pool):
         client.get("/me", headers=as_user[email])  # creates each profile from the token's name
     family = client.post("/families", json={"name": "The Washingtons"}, headers=as_user["alice@example.com"]).json()
     client.post("/families/join", json={"inviteCode": family["inviteCode"]}, headers=as_user["bob@example.com"])
+    recipe_ids = {}
     for email, recipe in SAMPLE_RECIPES:
         created = client.post("/recipes", json=recipe, headers=as_user[email]).json()
+        recipe_ids[recipe["title"]] = created["recipeId"]
         if email == "bob@example.com":
             client.post(f"/recipes/{created['recipeId']}/comments", headers=as_user["alice@example.com"],
                         json={"text": "Made this twice already. The brown butter is everything."})
@@ -137,6 +139,10 @@ def seed(app, pool):
     # A second family, so Alice is in two (accounts can belong to several).
     riveras = client.post("/families", json={"name": "The Rivera Kitchen"}, headers=as_user["carol@example.com"]).json()
     client.post("/families/join", json={"inviteCode": riveras["inviteCode"]}, headers=as_user["alice@example.com"])
+    # Alice shares her pie with both of her families (one recipe can go to several).
+    pie_id = recipe_ids["Grandma's Sweet Potato Pie"]
+    client.put(f"/recipes/{pie_id}/sharing", headers=as_user["alice@example.com"],
+               json={"visibility": "family", "familyIds": [family["familyId"], riveras["familyId"]]})
     client.post("/recipes", headers=as_user["carol@example.com"], json={
         "title": "Abuela's Pozole Rojo",
         "description": "Sunday pozole for the whole family.",

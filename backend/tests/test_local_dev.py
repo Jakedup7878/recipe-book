@@ -105,8 +105,11 @@ def test_accounts_and_recipes_survive_a_restart(tmp_path):
         assert me["userId"] == alice_id and me["preferences"]["season"] == "winter"
         assert second.api("GET", f"/recipes/{recipe['recipeId']}", alice_again).json()["authorName"] == "Alice"
         feed = second.api("GET", "/recipes", alice_again).json()
-        # One family recipe from each of Alice's two sample families; sample data was not re-seeded.
+        # Her pie (shared with both her families, listed once) and the Riveras' pozole;
+        # sample data was not re-seeded.
         assert len(feed["family"]) == 2 and len(feed["public"]) == 3
+        pie = next(r for r in feed["family"] if r["title"] == "Grandma's Sweet Potato Pie")
+        assert len(pie["familyIds"]) == 2
         assert second.sign_in("erin@example.com", "Recipes4Erin").status_code == 200
     finally:
         second.stop()

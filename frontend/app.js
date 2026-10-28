@@ -43,7 +43,9 @@ function showNotice(message) {
 // A modal <dialog> keeps focus inside, makes the page behind it inert, and
 // closes with Escape. Resolves true only when the confirm button is pressed.
 // tone "danger" paints the confirm button red and starts focus on Cancel.
-function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel = "Cancel", tone = "primary" }) {
+// content (optional) goes under the message, and gets focus; pass a function to
+// receive the confirm button, so the content can disable it or change its label.
+function confirmDialog({ title, message, content, confirmLabel = "OK", cancelLabel = "Cancel", tone = "primary" }) {
   return new Promise((resolve) => {
     // Every way out calls finish() directly. The dialog's own "close" event is only a backstop:
     // browsers fire it later as a queued task, which can be delayed (e.g. in a background tab).
@@ -58,11 +60,13 @@ function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel = "Can
     const cancel = h("button", { type: "button", class: "secondary", text: cancelLabel, onclick: () => finish(false) });
     const ok = h("button", { type: "button", class: tone === "danger" ? "danger-solid" : null, text: confirmLabel,
                              onclick: () => finish(true) });
+    const extra = typeof content === "function" ? content(ok) : content;
     const dialog = h("dialog", { class: "site-dialog", "aria-labelledby": "site-dialog-title" },
       h("div", { class: "dialog-body" },
         h("div", { class: "auth-motif", "aria-hidden": "true" }),
         h("h2", { id: "site-dialog-title", text: title }),
-        [message].flat().map((paragraph) => h("p", { text: paragraph })),
+        [message].flat().filter(Boolean).map((paragraph) => h("p", { text: paragraph })),
+        extra,
         h("div", { class: "dialog-actions" }, cancel, ok)));
     // A click on the dimmed backdrop lands on the <dialog> itself (dialog-body fills its inside).
     dialog.addEventListener("click", (event) => { if (event.target === dialog) finish(false); });
@@ -78,7 +82,7 @@ function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel = "Can
     dialog.addEventListener("close", () => finish(false));
     document.body.append(dialog);
     dialog.showModal();
-    (tone === "danger" ? cancel : ok).focus();
+    (extra?.querySelector?.("input, select, textarea") || (tone === "danger" ? cancel : ok)).focus();
   });
 }
 
@@ -288,8 +292,8 @@ async function loadMe() {
 
 // ---------- views ----------
 
-// The top bar is Home, Family and an account menu holding profile, appearance
-// and sign out. Signed out, it's Home plus the sign-in links; appearance is in
+// The top bar is Home, My recipes, Family and an account menu holding profile,
+// appearance and sign out. Signed out, it's Home plus the sign-in links; appearance is in
 // the footer (beside the static policy links) so the look can still be changed
 // without an account.
 function renderNav() {
@@ -297,7 +301,8 @@ function renderNav() {
   const link = (href, label, key) =>
     h("a", { href, text: label, "aria-current": page === key ? "page" : null });
   const links = me
-    ? [link("#/", "Home", ""), link("#/family", "Family", "family"), accountMenu(page)]
+    ? [link("#/", "Home", ""), link("#/mine", "My recipes", "mine"), link("#/family", "Family", "family"),
+       accountMenu(page)]
     : [
         link("#/", "Home", ""),
         link("#/signin", "Sign in", "signin"),
@@ -350,26 +355,33 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest?.(".account")) closeAccountMenu();
 });
 
-// familyNames maps familyId -> name, so a family recipe's badge can say which family.
-function recipeCard(recipe, { badge = true, familyNames = {} } = {}) {
-  return h("article", { class: "card recipe-card" },
+// Family-only cards get the family color. familyNames maps familyId -> name, so their
+// badge can say which families; showPublic labels public cards too (for mixed lists).
+function recipeCard(recipe, { badge = true, familyNames = {}, showPublic = false } = {}) {
+  const family = recipe.visibility === "family";
+  const label = family
+    ? badge && (capitalize(familyList(recipe.familyIds, familyNames)) || "Family only")
+    : showPublic && "Public";
+  return h("article", { class: family ? "card recipe-card family-recipe" : "card recipe-card" },
     h("div", {},
       h("a", { class: "card-title", href: `#/recipe/${recipe.recipeId}`, text: recipe.title }),
-      badge && recipe.visibility === "family"
-        ? [" ", h("span", { class: "badge", text: familyNames[recipe.familyId] || "Family only" })] : null),
+      label ? [" ", h("span", { class: family ? "badge family-badge" : "badge", text: label })] : null),
     h("div", { class: "muted", text: `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` }),
     recipe.description ? h("p", { class: "card-desc", text: recipe.description }) : null,
     h("div", { class: "muted", text: `${recipe.ingredients.length} ingredients · ${recipe.steps.length} steps` }),
   );
 }
 
-// cardOptions: by default the section heading says who can see the recipes, so cards skip the badge.
-function recipeSection(title, subtitle, recipes, emptyState, cardOptions = { badge: false }) {
-  return h("section", { class: "feed-section", "aria-label": title },
+// By default the section heading says who can see the recipes, so cards skip the badge.
+// family: true colors the heading like family cards; the rest are card options.
+function recipeSection(title, subtitle, recipes, emptyState, { family = false, ...cardOptions } = {}) {
+  return h("section", { class: family ? "feed-section family-section" : "feed-section", "aria-label": title },
     h("div", { class: "section-head" },
       h("h2", {}, title, " ", h("span", { class: "count", text: String(recipes.length) })),
       subtitle ? h("span", { class: "muted", text: subtitle }) : null),
-    recipes.length ? h("div", { class: "grid" }, recipes.map((r) => recipeCard(r, cardOptions))) : emptyState);
+    recipes.length
+      ? h("div", { class: "grid" }, recipes.map((r) => recipeCard(r, { badge: false, ...cardOptions })))
+      : emptyState);
 }
 
 // ---------- families (shared by several pages) ----------
@@ -388,8 +400,28 @@ function namesOf(families) {
   return Object.fromEntries(families.map((family) => [family.familyId, family.name]));
 }
 
-function plural(count, word) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
+function plural(count, word, many = `${word}s`) {
+  return `${count} ${count === 1 ? word : many}`;
+}
+
+// "The Washingtons", "The Washingtons and The Riveras", "The Washingtons and 2 more".
+// Only a recipe's author gets IDs of families they've since left.
+function familyList(familyIds = [], familyNames = {}) {
+  const names = familyIds.map((familyId) => familyNames[familyId] || "a family you've left");
+  return names.length <= 2 ? names.join(" and ") : `${names[0]} and ${names.length - 1} more`;
+}
+
+// Styled checkboxes for picking families (the share dialog and the recipe form).
+// `left`: families a recipe is shared with that you've left; they can only be unticked.
+function familyPicker(families, selected, { left = [], onChange = () => {} } = {}) {
+  const option = (familyId, name, detail) => h("label", { class: "choice" },
+    h("input", { type: "checkbox", value: familyId, checked: selected.has(familyId), onchange: () => onChange(picked()) }),
+    h("span", { class: "choice-text" }, h("strong", { text: name }), h("span", { class: "muted", text: detail })));
+  const node = h("div", { class: "choice-list", role: "group", "aria-label": "Families" },
+    families.map((f) => option(f.familyId, f.name, plural(f.members.length, "member"))),
+    left.map((familyId) => option(familyId, "A family you've left", "Untick to stop sharing with it")));
+  const picked = () => [...node.querySelectorAll("input:checked")].map((input) => input.value);
+  return { node, picked };
 }
 
 async function feedView() {
@@ -410,18 +442,19 @@ async function feedView() {
   // Recipes from every family you're in; with more than one family, each card says which.
   const familySection = families.length
     ? recipeSection("Family recipes",
-        families.length === 1 ? `Only ${families[0].name} can see these` : `From your ${families.length} families`,
+        families.length === 1 ? `Shared with ${families[0].name}` : `From your ${families.length} families`,
         feed.family,
         h("div", { class: "empty" },
           h("p", { text: "No family recipes yet." }),
           h("a", { class: "button", href: "#/new/family", text: "Share one with your family" })),
-        { badge: families.length > 1, familyNames: namesOf(families) })
+        { family: true, badge: families.length > 1, familyNames: namesOf(families) })
     : recipeSection("Family recipes", null, [],
         h("div", { class: "card invite-card" },
           h("div", {},
             h("h3", { text: "Keep recipes in the family" }),
             h("p", { class: "muted", text: "Start or join a family to share recipes only your family can see." })),
-          h("a", { class: "button", href: "#/family", text: "Set up a family" })));
+          h("a", { class: "button", href: "#/family", text: "Set up a family" })),
+        { family: true });
 
   render(
     h("div", { class: "page-head" },
@@ -434,6 +467,35 @@ async function feedView() {
       h("div", { class: "empty" },
         h("p", { text: "No public recipes yet." }),
         h("a", { class: "button", href: "#/new", text: "Write the first one" }))),
+  );
+}
+
+// Everything you've written: your family-only recipes first, then all of them.
+async function myRecipesView() {
+  if (!me) return requireSignIn("Sign in to see your recipes.");
+  const [{ recipes }, families] = await Promise.all([api("/me/recipes"), loadFamilies()]);
+  const familyNames = namesOf(families);
+  const familyOnly = recipes.filter((r) => r.visibility === "family");
+  render(
+    h("div", { class: "page-head" },
+      h("div", {},
+        h("h1", { text: "My recipes" }),
+        h("div", { class: "muted", text: "Everything you've written, newest first." })),
+      h("a", { class: "button", href: "#/new", text: "New recipe" })),
+    recipeSection("Shared with family", "Only the families you picked can see these", familyOnly,
+      h("div", { class: "empty" },
+        h("p", { text: families.length ? "None of your recipes are family-only yet."
+                                       : "Start or join a family to share recipes with family only." }),
+        families.length
+          ? h("a", { class: "button", href: "#/new/family", text: "Write a family recipe" })
+          : h("a", { class: "button", href: "#/family", text: "Set up a family" })),
+      { family: true, badge: true, familyNames }),
+    recipeSection("All my recipes",
+      `${plural(familyOnly.length, "family recipe")} · ${recipes.length - familyOnly.length} public`, recipes,
+      h("div", { class: "empty" },
+        h("p", { text: "You haven't written any recipes yet." }),
+        h("a", { class: "button", href: "#/new", text: "Write your first recipe" })),
+      { badge: true, familyNames, showPublic: true }),
   );
 }
 
@@ -473,24 +535,62 @@ async function recipeView(id) {
     api(base), api(`${base}/comments`), me ? loadFamilies() : [],
   ]);
   const isAuthor = me && me.userId === recipe.authorId;
-  const familyName = namesOf(families)[recipe.familyId];
+  const familyNames = namesOf(families);
+  const isFamily = recipe.visibility === "family";
+  const sharedWith = familyList(recipe.familyIds, familyNames);
 
-  // Moves the recipe from its family to Public (the same as Edit > Who can see it > Public).
-  const publish = async () => {
-    const where = familyName || "your family";
+  // Moves the recipe out of its families into Public recipes.
+  const sharePublic = async () => {
     if (!await confirmDialog({
-      title: `Publish "${recipe.title}" to everyone?`,
+      title: `Share "${recipe.title}" with everyone?`,
       message: [
         "Anyone, signed in or not, will be able to see it and comment.",
-        `It moves from ${where} to Public recipes, where your family can still see it. ` +
-        "You can make it family-only again with Edit.",
+        `It moves from ${sharedWith || "your family"} to Public recipes, where your families can still see it. ` +
+        "You can share it with family only again at any time.",
       ],
-      confirmLabel: "Publish to public",
+      confirmLabel: "Share to Public",
     })) return;
-    const { title, description, ingredients, steps } = recipe;
-    await api(`/recipes/${id}`, { method: "PUT", body: { title, description, ingredients, steps, visibility: "public" } });
-    go(`#/recipe/${id}`, "Published. Everyone can see this recipe now.");
+    await api(`/recipes/${id}/sharing`, { method: "PUT", body: { visibility: "public" } });
+    go(`#/recipe/${id}`, "Shared to Public. Everyone can see this recipe now.");
   };
+
+  // Picks which of your families can see it (this also takes a public recipe private).
+  const shareFamily = async () => {
+    const current = isFamily ? recipe.familyIds : families.length === 1 ? [families[0].familyId] : [];
+    const left = isFamily ? recipe.familyIds.filter((familyId) => !familyNames[familyId]) : [];
+    let picker;
+    if (!await confirmDialog({
+      title: `Share "${recipe.title}" with family`,
+      message: [
+        "Pick the families that can see it. Their members see it and its comments, " +
+        "including comments from the other families you pick.",
+        isFamily ? null : "It will no longer be public.",
+      ],
+      content: (ok) => {
+        const update = (picked) => {
+          ok.disabled = !picked.length;
+          ok.textContent = picked.length ? `Share with ${plural(picked.length, "family", "families")}` : "Pick a family";
+        };
+        picker = familyPicker(families, new Set(current), { left, onChange: update });
+        update(picker.picked());
+        return picker.node;
+      },
+    })) return;
+    const familyIds = picker.picked();
+    await api(`/recipes/${id}/sharing`, { method: "PUT", body: { visibility: "family", familyIds } });
+    go(`#/recipe/${id}`, `Shared with ${familyList(familyIds, familyNames)}.`);
+  };
+
+  const sharing = isAuthor ? h("section", { class: `card sharing-card${isFamily ? " family-recipe" : ""}` },
+    h("div", {},
+      h("h2", { text: "Who can see this" }),
+      h("p", { class: "muted", text: isFamily ? `Family only: ${capitalize(sharedWith)}.`
+                                              : "Public: anyone can see it, signed in or not." })),
+    h("div", { class: "row" },
+      isFamily ? h("button", { type: "button", class: "secondary", text: "Share to Public", onclick: sharePublic }) : null,
+      families.length || isFamily
+        ? h("button", { type: "button", text: "Share to Family", onclick: shareFamily })
+        : h("a", { class: "button secondary", href: "#/family", text: "Set up a family to share with" }))) : null;
 
   const commentBox = h("textarea", { maxlength: 2000, required: true, placeholder: "Share a tip or say thanks", "aria-label": "Comment" });
   const commentForm = me ? h("form", {
@@ -508,13 +608,12 @@ async function recipeView(id) {
     h("div", { class: "page-head" },
       h("div", {},
         h("h1", { class: "recipe-title" }, recipe.title,
-          recipe.visibility === "family"
-            ? [" ", h("span", { class: "badge", text: familyName ? `Family only · ${familyName}` : "Family only" })]
+          isFamily
+            ? [" ", h("span", { class: "badge family-badge",
+                                text: sharedWith ? `Family only · ${capitalize(sharedWith)}` : "Family only" })]
             : null),
         h("div", { class: "muted", text: `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` })),
       isAuthor ? h("div", { class: "row" },
-        recipe.visibility === "family"
-          ? h("button", { type: "button", class: "secondary", text: "Publish to public", onclick: publish }) : null,
         h("a", { class: "button", href: `#/edit/${id}`, text: "Edit" }),
         h("button", {
           class: "danger",
@@ -528,6 +627,7 @@ async function recipeView(id) {
             location.hash = "#/";
           },
         })) : null),
+    sharing,
     recipe.description ? h("p", { class: "description", text: recipe.description }) : null,
     h("div", { class: "recipe-layout" },
       h("section", { class: "card" },
@@ -543,7 +643,7 @@ async function recipeView(id) {
   );
 }
 
-// defaults preselect who can see a new recipe: #/new/family picks your first
+// defaults preselect who can see a new recipe: #/new/family ticks your first
 // family, #/new/family/<familyId> that family.
 async function recipeFormView(id, defaults = {}) {
   if (!me) return requireSignIn();
@@ -556,23 +656,33 @@ async function recipeFormView(id, defaults = {}) {
   ingredients.value = lines(existing?.ingredients);
   const steps = h("textarea", { required: true, placeholder: "Preheat the oven to 350°F.\nWhisk the dry ingredients." });
   steps.value = lines(existing?.steps);
-  // Option values are "public" or "family:<familyId>".
+  // Who can see it: Public, or Family plus the families ticked in the picker.
   const inFamily = (familyId) => families.some((f) => f.familyId === familyId);
-  const leftFamily = existing?.visibility === "family" && !inFamily(existing.familyId);
-  const visibility = h("select", {},
-    h("option", { value: "public", text: "Public: anyone can see it" }),
-    families.map((f) => h("option", { value: `family:${f.familyId}`, text: `Family only: ${f.name}` })),
-    // Kept selectable so saving doesn't silently make it public; the API asks for a family you're in.
-    leftFamily ? h("option", { value: `family:${existing.familyId}`, text: "Family only: a family you've left" }) : null,
-    families.length ? null : h("option", { value: "family", disabled: true, text: "Family only (join or start a family first)" }),
-  );
-  if (existing) {
-    visibility.value = existing.visibility === "family" ? `family:${existing.familyId}` : "public";
-  } else if (inFamily(defaults.familyId)) {
-    visibility.value = `family:${defaults.familyId}`;
-  } else {
-    visibility.value = defaults.family && families.length ? `family:${families[0].familyId}` : "public";
-  }
+  const wasFamily = existing?.visibility === "family";
+  // Families it's shared with that you've left stay listed, so saving doesn't silently drop them.
+  const left = wasFamily ? existing.familyIds.filter((familyId) => !inFamily(familyId)) : [];
+  const ticked = wasFamily ? existing.familyIds
+    : inFamily(defaults.familyId) ? [defaults.familyId] : families.slice(0, 1).map((f) => f.familyId);
+  const startsFamily = existing ? wasFamily : Boolean(defaults.family || inFamily(defaults.familyId));
+  const canShareWithFamily = families.length > 0 || left.length > 0;
+  const picker = familyPicker(families, new Set(ticked), { left });
+  const pickerWrap = h("div", { hidden: !startsFamily }, picker.node);
+  const radio = (value, checked) => h("input", {
+    type: "radio", name: "visibility", value, checked, disabled: value === "family" && !canShareWithFamily,
+    onchange: () => { pickerWrap.hidden = !familyChoice.checked; },
+  });
+  const publicChoice = radio("public", !startsFamily);
+  const familyChoice = radio("family", startsFamily);
+  const visibility = h("fieldset", { class: "visibility" },
+    h("legend", { text: "Who can see it" }),
+    h("div", { class: "visibility-choices" },
+      h("label", { class: "choice public-choice" }, publicChoice,
+        h("span", { class: "choice-text" }, h("strong", { text: "Public" }),
+          h("span", { class: "muted", text: "Anyone, signed in or not" }))),
+      h("label", { class: "choice" }, familyChoice,
+        h("span", { class: "choice-text" }, h("strong", { text: "Family only" }),
+          h("span", { class: "muted", text: canShareWithFamily ? "Only the families you tick" : "Start or join a family first" })))),
+    pickerWrap);
   const toLines = (el) => el.value.split("\n").map((s) => s.trim()).filter(Boolean);
 
   render(
@@ -581,10 +691,11 @@ async function recipeFormView(id, defaults = {}) {
       class: "card",
       onsubmit: async (event) => {
         event.preventDefault();
-        const [who, familyId] = visibility.value.split(":");
+        const familyIds = familyChoice.checked ? picker.picked() : null;
+        if (familyIds && !familyIds.length) throw new Error("Tick at least one family, or choose Public.");
         const body = {
-          title: title.value, description: description.value,
-          ingredients: toLines(ingredients), steps: toLines(steps), visibility: who, familyId: familyId || null,
+          title: title.value, description: description.value, ingredients: toLines(ingredients),
+          steps: toLines(steps), visibility: familyIds ? "family" : "public", familyIds,
         };
         const saved = existing
           ? await api(`/recipes/${id}`, { method: "PUT", body })
@@ -596,9 +707,7 @@ async function recipeFormView(id, defaults = {}) {
       h("label", {}, "Description", h("span", { class: "hint", text: "Optional. A line or two about the dish." }), description),
       h("label", {}, "Ingredients", h("span", { class: "hint", text: "One per line." }), ingredients),
       h("label", {}, "Steps", h("span", { class: "hint", text: "One per line; they're numbered for you." }), steps),
-      h("label", {}, "Who can see it",
-        families.length > 1 ? h("span", { class: "hint", text: "A family recipe is seen only by the family you pick." }) : null,
-        visibility),
+      visibility,
       h("div", {}, h("button", { type: "submit", text: existing ? "Save changes" : "Publish recipe" })),
     ),
   );
@@ -772,10 +881,11 @@ async function familyDetailView(familyId) {
     h("div", { class: "page-head" },
       h("div", {}, heading, h("div", { class: "muted", text: plural(family.members.length, "member") })),
       h("a", { class: "button", href: `#/new/family/${familyId}`, text: "Share a family recipe" })),
-    recipeSection("Family recipes", `Only ${family.name} can see these`, recipes,
+    recipeSection("Family recipes", `Shared with ${family.name}`, recipes,
       h("div", { class: "empty" },
         h("p", { text: "No family recipes yet." }),
-        h("a", { class: "button", href: `#/new/family/${familyId}`, text: "Share the first one" }))),
+        h("a", { class: "button", href: `#/new/family/${familyId}`, text: "Share the first one" })),
+      { family: true }),
     h("h2", { text: `Members (${family.members.length})` }),
     // Only the owner gets the invite code back from the API (inviteCode is null for everyone else).
     inviteCard,
@@ -1298,6 +1408,7 @@ async function route() {
     else if (page === "recipe" && id) await recipeView(id);
     else if (page === "new") await recipeFormView(null, { family: id === "family", familyId: extra });
     else if (page === "edit" && id) await recipeFormView(id);
+    else if (page === "mine") await myRecipesView();
     else if (page === "family" && id) await familyDetailView(id);
     else if (page === "family") await familiesView();
     else if (page === "join" && id) await joinView(decodeURIComponent(id));

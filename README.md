@@ -18,10 +18,11 @@ This is the starting point. The details are in [`docs/`](docs/):
 ## What it does
 
 - **Accounts**: sign up with email and password, confirm with an emailed code, sign in, reset a forgotten password. The site has its own sign-in pages; Amazon Cognito does the actual account work.
-- **Recipes**: title, description, ingredients and steps. Each recipe is **public** (anyone, even signed out) or **family only** (one family you choose).
+- **Recipes**: title, description, ingredients and steps. Each recipe is **public** (anyone, even signed out) or **family only** (one or more of your families, which you tick).
+- **My recipes**: everything you've written in one place, with your family-only recipes first. Family-only cards have their own color everywhere.
+- **Sharing**: on your own recipe, **Share to Public** or **Share to Family** (pick families from styled checkboxes). Members of one family never see the names of your other families.
 - **Comments** from other accounts, with current display names, "You" and "Recipe author" badges, and deletion by the comment's author or the recipe's author.
 - **Families**: an account can be in up to 10. Start one, invite people with a code or a link (`/#/join/<code>`), rename it (owner), remove members (owner), or leave. Home merges the family recipes from all your families.
-- **Publishing**: an author can move a family recipe to public.
 - **Appearance**: four seasonal themes (fall, winter, spring, summer) or "auto" by date and hemisphere, light/dark/system mode, custom accent colors with automatic contrast fixing, fonts, text size. These settings are saved to the account.
 - **Rate limiting**: an overall limit at API Gateway, plus per-account and per-IP limits in the API.
 - **Privacy Policy and Terms of Service** at `/privacy.html` and `/terms.html`, linked in every page's footer. Sign-up requires agreeing to both.

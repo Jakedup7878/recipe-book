@@ -100,6 +100,17 @@ def test_policy_pages_have_a_date_and_a_contact(page):
     assert 'href="mailto:support@familyfoodiebook.com"' in html
 
 
+def test_every_page_link_goes_to_a_page_the_router_handles():
+    # A link to a page route() doesn't know silently falls through to the home feed.
+    source = read("app.js")
+    router = source[source.index("async function route()"):source.index("// Errors thrown from form")]
+    handled = set(re.findall(r'page === "([a-z]+)"', router)) | {""}
+    # Every "#/page..." string in the app, except prefix checks like startsWith("#/sign").
+    linked = set(re.findall(r'(?<!startsWith\()[`"]#/([a-z]*)', source))
+    assert {"mine", "family", "recipe", "new", "edit", "signin", "signup"} <= linked
+    assert linked - handled == set()
+
+
 def test_sign_up_requires_agreeing_to_both_policies():
     source = read("app.js")
     sign_up = source[source.index("function signUpView()"):source.index("function confirmView()")]

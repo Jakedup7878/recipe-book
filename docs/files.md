@@ -27,7 +27,7 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **auth** against the Cognito API: sign up, confirm, sign in, refresh, revoke, forgot password; plus token storage;
 - the **API client** `api()`, with rate-limit and stale-page handling;
 - the **nav and account menu**;
-- **pages**: Home feed, recipe page, recipe form, families list, family page, invite page, profile, appearance, and the auth pages;
+- **pages**: Home feed, My recipes, recipe page, recipe form, families list, family page, invite page, profile, appearance, and the auth pages;
 - the **router**.
 
 **Why it's built this way:**
@@ -39,7 +39,13 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **`PASSWORD_RULES`** mirrors the Cognito password policy, so the sign-up form can show a live checklist before submitting. It's kept in sync by hand with `infra/recipe_stack.py` and `backend/local_cognito.py`, with comments pointing to each other.
 - **`confirmDialog()`** uses a modal `<dialog>` (focus stays inside, the page behind is inert). Every way of closing it reports the answer immediately, because the browser's own `close` event can be delayed in background tabs. Destructive dialogs put focus on Cancel.
 - **The account menu is a disclosure** (a button plus a list of links), not an ARIA "menu", so Tab and Enter work like the rest of the page.
-- **Families**: `myFamilies` caches your families for the page being shown, `namesOf()` maps IDs to names for badges, and `MAX_FAMILIES` mirrors the backend's limit.
+- **Families**: `myFamilies` caches your families for the page being shown, `namesOf()` maps IDs to names for badges, `familyList()` turns a recipe's `familyIds` into words ("The Washingtons and 2 more"), and `MAX_FAMILIES` mirrors the backend's limit.
+- **Sharing** (`recipeView`): your own recipe shows a "Who can see this" panel with **Share to Public** and **Share to Family**.
+  - Share to Family opens `confirmDialog()` with a `familyPicker()`: styled checkboxes, one per family, with any families you've left listed so they can be unticked.
+  - The dialog's `content` option takes a function that receives the confirm button, so the picker can keep its label ("Share with 2 families") and disabled state in step with the ticks.
+  - The recipe form reuses the same picker under a Public / Family-only choice.
+- **My recipes** (`#/mine`) lists your family-only recipes first, then all of them, from `GET /me/recipes`.
+- **Family-only cards are colored** wherever they appear (`recipeCard()` adds `family-recipe`); `recipeSection(..., { family: true })` colors a section's heading to match.
 - **Invite links** are `#/join/<code>`. Signed-out visitors go to sign-in first and come back afterwards (`returnTo` in `sessionStorage`). The join form also accepts a pasted link.
 - **Copy to clipboard** tries the Clipboard API, then falls back to copying from a hidden text field. Some in-app browsers block the Clipboard API.
 - **The location feature** only ever stores `north` or `south`. It re-checks quietly when the app opens, and the permission prompt appears only when you turn it on.
@@ -71,6 +77,8 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **Design tokens as variables** (`--bg`, `--surface`, `--text`, `--accent`…), keyed on `data-season` and `data-mode`. Switching theme is just changing two attributes, and custom accents flow through `color-mix()` to the derived colors (`--accent-soft`, `--accent-border`).
 - **No inline styles anywhere**, because the CSP blocks them. That's why, for example, the copy fallback's hidden field uses the `.copy-buffer` class.
 - **The "stretched link" pattern** makes whole recipe cards clickable while keeping one real link per card for keyboards and screen readers.
+- **A family color (`--family`) per season and mode**, a hue apart from that season's accent (green in fall, plum in winter, teal-blue in spring, berry in summer), checked to at least 4.5:1 contrast for small text on its tinted background. `--family-soft` and `--family-border` are derived from it like the accent ones.
+- **Choice cards (`.choice`)** are real checkboxes and radios with `appearance: none`, drawn larger. They keep keyboard use, focus rings and screen-reader labels for free. The CSS variable `--choice` switches them between the family color and the accent (for Public).
 - **Mobile rules**: the nav wraps under the brand, the account menu goes full width, and dialog buttons stretch. Everything was checked at 375 px with no sideways scrolling.
 - **`prefers-reduced-motion`** turns off transitions and the dialog's fade-in.
 - **`[hidden] { display: none !important }`** stops button `display` rules from un-hiding hidden elements, which was an early bug.
@@ -108,11 +116,11 @@ Only this folder is packaged into the Lambda function.
 ### `backend/recipe_api/main.py`
 **What:** The FastAPI application: models, identity, rate limiting, and every route.
 - **Errors**: one JSON shape, `{"message": …}`, for application errors, HTTP errors and validation errors.
-- **Models** (pydantic): `Profile`, `Preferences`, `RecipeIn`/`Recipe`, `Feed`, `Comment`, `Family`, `MyFamilies`, `InvitePreview`, `FamilyRename`… with length limits on every text field.
+- **Models** (pydantic): `Profile`, `Preferences`, `RecipeIn`/`Recipe`, `Sharing`, `Feed`, `Comment`, `Family`, `MyFamilies`, `InvitePreview`, `FamilyRename`… with length limits on every text field. `RecipeIn` still accepts the older one-family `familyId` field, in case a browser has a cached copy of the old app.
 - **Identity**: `claims_from()` takes the verified JWT claims API Gateway put in the event. Locally it falls back to the local token verifier, or to an `X-Dev-User` header when local dev headers are enabled.
 - **Dependencies**: `Reader`, `Writer` and `Commenter` (signed-in, each with its own rate-limit bucket) and `anonymous` (per-IP limit for public routes).
 - **Profiles**: `get_or_create_profile()` creates a profile on first use, with the display name taken from the sign-up `name` claim. It also upgrades old single-family profiles.
-- **Recipes**: create, list feeds, get, update or publish, delete; with visibility and family checks.
+- **Recipes**: create, list feeds, **my recipes** (`GET /me/recipes`), get, update, **share** (`PUT /recipes/{id}/sharing`: public, or a set of your families), delete; with visibility and family checks.
 - **Comments**: list, add, delete.
 - **Families**: create, list mine, invite preview, join, rename, family recipes, leave, rotate the invite code, remove a member.
 - **Public routes** for signed-out visitors.
@@ -126,7 +134,14 @@ Only this folder is packaged into the Lambda function.
 - **Transactions for families.** Membership changes touch several items: the family, the member, the invite code and your profile. They all succeed or all fail. Conditions inside the transaction enforce "not already a member", "fewer than 10 families" and "the code wasn't just changed".
 - **`MAX_FAMILIES = 10`** keeps Home to a bounded number of queries.
 - **`upgrade_single_family()`** moves old data forward on read, in one conditional update, so no migration job was needed.
-- **Publishing reuses `PUT /recipes/{id}`.** Changing visibility to public is just an edit, so one code path enforces the "author only" rule.
+- **Sharing has its own route, `PUT /recipes/{id}/sharing`**, so the recipe page's Share buttons don't have to send the whole recipe back. `PUT /recipes/{id}` can still change visibility too, for the edit form. Both go through the same helpers, so the rules live in one place:
+  - `chosen_families()` holds the rules: only the author, only your own families (families you've since left may be kept or dropped), at least one, at most 10.
+  - `with_sharing()` shapes the recipe item.
+  - `save_recipe()` writes the recipe and its `SHARE` items in one transaction.
+- **`family_feed()` re-reads and re-checks each recipe** behind a family's `SHARE` items. Share items hold no recipe data, so there's nothing to keep in sync on edits, and a leftover share can never leak a recipe.
+- **`present()`** is the one place recipes are shaped for a viewer: current author names, and `familyIds` trimmed to the viewer's own families unless they wrote the recipe.
+- **`recipe_family_ids()`** reads both the new `familyIds` set and the old single `familyId`, so recipes saved before multi-family sharing keep working; they're upgraded the next time they're saved.
+- **`batch_get()`** wraps BatchGetItem's 100-key limit and its "unprocessed keys" retry, used by both names and feeds.
 - **Docs are off in Lambda** (`docs_url=None`). API Gateway only forwards the listed routes anyway, but `/docs` stays useful locally.
 
 ### `backend/recipe_api/ratelimit.py`
@@ -171,7 +186,7 @@ Only this folder is packaged into the Lambda function.
 - a local `/config.json` that points the site at those;
 - the `frontend/` folder served as static files.
 
-On the first run it creates three test accounts (alice, bob and carol), sample recipes, and two families, so that alice is in both. Flags: `--reset` (wipe local data), `--empty` (no sample data), `--data-dir`, and the `PORT` environment variable.
+On the first run it creates three test accounts (alice, bob and carol), sample recipes, and two families, so that alice is in both. Alice's family pie is shared with both of her families. Flags: `--reset` (wipe local data), `--empty` (no sample data), `--data-dir`, and the `PORT` environment variable.
 
 **Why:**
 - **Nothing touches AWS.** It's free, works offline, and it's safe to break things.
@@ -190,7 +205,7 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 - **Why not moto's Cognito?** It needed extra dependencies, and its default password policy rejected the test passwords. A small purpose-built stand-in was simpler and fully under our control.
 
 ### `backend/devtools.py`
-**What:** Two helpers shared by the tests and local dev: `use_fake_aws()` (fake credentials, the Region, and the API folder on the import path) and `create_table()` (a table shaped exactly like the real one, including `gsi1`).
+**What:** Two helpers shared by the tests and local dev: `use_fake_aws()` (fake credentials, the Region, and the API folder on the import path) and `create_table()` (a table shaped exactly like the real one, including the `gsi1` and `byAuthor` indexes).
 
 **Why:** One definition of the table shape outside the CDK. If tests and local dev each built their own table, they could drift apart.
 
@@ -213,6 +228,13 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 - membership rules, owner removal and multiple families;
 - the 10-family limit, rename and invite preview;
 - publishing;
+- sharing one recipe with several families:
+  - only the author can share, and only with their own families;
+  - each family's feed shows it, and Home lists it once;
+  - other members see only their own families' names;
+  - unsharing, keeping or dropping a family the author has left, sharing to Public, and deleting it with its shares;
+- My recipes: everything you wrote, comments excluded, still listed after leaving a family;
+- recipes saved with one `familyId` still showing up, and upgrading to `SHARE` items when edited;
 - upgrading old single-family profiles;
 - validation errors, dropped blank lines;
 - 429s and the per-IP limit.
@@ -233,6 +255,7 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 - No page has inline scripts, styles or event handlers, which the CSP would block.
 - Every page's footer links both policies.
 - Every `#anchor` link in the policies, including cross-links such as `terms.html#who-can-use`, points at a heading that exists.
+- Every `#/page` link in `app.js` (such as `#/mine`) goes to a page `route()` handles; an unknown one would quietly show Home.
 - Each policy page has an "Effective" date and the support email address.
 - The sign-up form has both required checkboxes, and checks them before calling Cognito.
 - `app.js` and `theme.js` must parse (`node --check`).
@@ -332,8 +355,9 @@ It tags everything `project=recipe-book`.
 **Why:** Pinned versions mean the pipeline builds with exactly what was tested locally. The CLI is a Node package, separate from the Python library. `npm ci` installs exactly what the lock file says.
 
 ### `infra/tests/test_recipe_stack.py`
-**What:** Synthesizes the app stack and checks four things:
+**What:** Synthesizes the app stack and checks five things:
 - the table and user pool are retained;
+- the table has exactly the two indexes the API queries (`gsi1`, `byAuthor`); CloudFormation can only add one index per deploy, so this flags changes that would add two at once;
 - without a domain, the site uses the CloudFront address;
 - with a domain, both names, the certificate, the redirect function, the DNS records and CORS are set up correctly;
 - with support mail, the mail DNS records sit alongside the unchanged site records; support@ is stored then forwarded and dmarc-reports@ only stored; the rule set is activated; the mail bucket is retained with a 365-day expiry; the forwarder can read only its one parameter; and no address other than the domain's own appears in the template. Without the parameter setting, none of it is created.

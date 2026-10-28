@@ -14,6 +14,7 @@
   --muted: #7d5f4a;
   --accent: #b9501c;
   --accent-text: #ffffff;
+  --family: #346b44;
   --border: #ead6bf;
   --danger: #a3261f;
   --header-from: #7a3312;
@@ -31,6 +32,7 @@
   --muted: #c2a58c;
   --accent: #e8833a;
   --accent-text: #1a1410;
+  --family: #7fc495;
   --border: #4a3427;
   --danger: #f08a7e;
   --header-from: #3a1d0e;
@@ -46,6 +48,7 @@
   --muted: #5d6f82;
   --accent: #2f6690;
   --accent-text: #ffffff;
+  --family: #7b4d8f;
   --border: #d3dfeb;
   --danger: #a3261f;
   --header-from: #1f3d5a;
@@ -63,6 +66,7 @@
   --muted: #9db0c3;
   --accent: #7fb6e0;
   --accent-text: #0f1720;
+  --family: #c9a2e0;
   --border: #2a3a4b;
   --danger: #f08a7e;
   --header-from: #0d1f30;
@@ -78,6 +82,7 @@
   --muted: #66735a;
   --accent: #a8406b;
   --accent-text: #ffffff;
+  --family: #2a6878;
   --border: #dfe6cf;
   --danger: #a3261f;
   --header-from: #557a3c;
@@ -95,6 +100,7 @@
   --muted: #aab59b;
   --accent: #e88aae;
   --accent-text: #161a13;
+  --family: #7cc3d6;
   --border: #36412e;
   --danger: #f08a7e;
   --header-from: #24361a;
@@ -110,6 +116,7 @@
   --muted: #6f6a55;
   --accent: #0f7478;
   --accent-text: #ffffff;
+  --family: #8c4a9a;
   --border: #f1e2bd;
   --danger: #a3261f;
   --header-from: #d98a14;
@@ -127,6 +134,7 @@
   --muted: #a9b3ad;
   --accent: #4fc3c0;
   --accent-text: #131a1a;
+  --family: #d2a2e2;
   --border: #2e3f3f;
   --danger: #f08a7e;
   --header-from: #5a3a08;
@@ -139,6 +147,9 @@
 [data-season] {
   --accent-soft: color-mix(in srgb, var(--accent) 14%, var(--surface));
   --accent-border: color-mix(in srgb, var(--accent) 45%, var(--border));
+  /* Family-only recipes use --family (a hue apart from each season's accent) instead. */
+  --family-soft: color-mix(in srgb, var(--family) 12%, var(--surface));
+  --family-border: color-mix(in srgb, var(--family) 45%, var(--border));
   --shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent),
             0 6px 18px color-mix(in srgb, var(--text) 7%, transparent);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
@@ -368,6 +379,16 @@ main.narrow { max-width: 760px; }
   vertical-align: middle;
 }
 
+/* Family-only recipes: tinted cards with a family-colored edge, wherever they're listed. */
+.family-recipe { background: var(--family-soft); border-color: var(--family-border); border-left: 4px solid var(--family); }
+.recipe-card.family-recipe:hover { border-color: var(--family); }
+.badge.family-badge { background: var(--surface); color: var(--family); border-color: var(--family-border); }
+.family-section .count { background: var(--family-soft); color: var(--family); }
+.family-section .section-head h2::before {
+  content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 8px;
+  border-radius: 4px; background: var(--family); vertical-align: 2px;
+}
+
 .feed-section { margin-bottom: 34px; }
 .section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 12px; }
 .section-head h2 { margin: 0; }
@@ -459,6 +480,51 @@ textarea { min-height: 130px; resize: vertical; }
   background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 0.9rem;
 }
 .description { white-space: pre-wrap; font-size: 1.05rem; }
+
+/* "Who can see this" on your own recipe, with Share to Public / Share to Family. */
+.sharing-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; margin: 4px 0 18px; }
+.sharing-card h2 { margin: 0 0 2px; font-size: 1.05rem; }
+.sharing-card p { margin: 0; }
+
+/* Choice cards: real checkboxes and radios, drawn bigger, in the family color (accent for Public).
+   Used by the share dialog's family picker and the recipe form's "Who can see it". */
+.choice-list { display: grid; gap: 8px; }
+.choice {
+  --choice: var(--family); --choice-soft: var(--family-soft); --choice-border: var(--family-border);
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--border); border-radius: 12px;
+  background: var(--surface);
+  font-weight: 400; cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.choice.public-choice { --choice: var(--accent); --choice-soft: var(--accent-soft); --choice-border: var(--accent-border); }
+.choice:hover { border-color: var(--choice-border); }
+.choice:has(input:checked) { border-color: var(--choice); background: var(--choice-soft); }
+.choice:has(input:disabled) { opacity: 0.55; cursor: default; }
+.choice-text { display: grid; gap: 1px; min-width: 0; }
+.choice-text strong { overflow-wrap: anywhere; }
+.choice input {
+  appearance: none; flex: none;
+  width: 22px; height: 22px; margin: 0; padding: 0;
+  display: grid; place-items: center;
+  border: 2px solid var(--choice-border); border-radius: 6px;
+  background: var(--surface); cursor: inherit;
+}
+.choice input[type="radio"] { border-radius: 50%; }
+.choice input:focus { outline: none; border-color: var(--choice-border); }  /* not the text-field focus style */
+.choice input:checked { background: var(--choice); border-color: var(--choice); }
+.choice input[type="checkbox"]:checked::after {
+  content: ""; width: 6px; height: 11px; margin-top: -2px;
+  border: solid var(--surface); border-width: 0 2.5px 2.5px 0; transform: rotate(45deg);
+}
+.choice input[type="radio"]:checked::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--surface); }
+.choice input:focus-visible { outline: 3px solid var(--choice); outline-offset: 2px; }
+
+.visibility { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.visibility legend { padding: 0; margin-bottom: 6px; font-weight: 600; font-size: 0.95rem; }
+.visibility-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+.site-dialog .choice-list { margin: 4px 0 14px; max-height: 50vh; overflow: auto; padding: 3px; }
 
 .comment { border-top: 1px solid var(--border); padding: 14px 0; }
 .comment p { margin: 8px 0 6px 44px; white-space: pre-wrap; }

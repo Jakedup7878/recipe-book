@@ -65,27 +65,35 @@ sequenceDiagram
 
 ## 3. Data model (one DynamoDB table)
 
-All data lives in one table with a generic primary key (`pk`, `sk`) and one global secondary index (`gsi1pk`, `gsi1sk`). This is "single-table design": each kind of item gets a key prefix, and related items share a partition, so a single query fetches them together.
+All data lives in one table with a generic primary key (`pk`, `sk`) and two global secondary indexes, `gsi1` and `byAuthor`. This is "single-table design": each kind of item gets a key prefix, and related items share a partition, so a single query fetches them together.
 
 | pk | sk | Item | Key attributes |
 |---|---|---|---|
 | `USER#<sub>` | `PROFILE` | Account profile | `userId`, `email`, `displayName`, `familyIds` (a string set, up to 10), `preferences`, `createdAt` |
-| `RECIPE#<id>` | `META` | Recipe | `title`, `description`, `ingredients`, `steps`, `visibility`, `familyId` (family recipes only), `authorId`, `authorName`, `createdAt`, `updatedAt`, `gsi1pk`, `gsi1sk` |
+| `RECIPE#<id>` | `META` | Recipe | `title`, `description`, `ingredients`, `steps`, `visibility`, `familyIds` (family-only recipes: a string set, up to 10), `authorId`, `authorName`, `createdAt`, `updatedAt`; `gsi1pk`/`gsi1sk` for public recipes only |
+| `RECIPE#<id>` | `SHARE#<familyId>` | Puts a family-only recipe in one family's feed | `recipeId`, `familyId`, `gsi1pk = FAMILYFEED#<familyId>`, `gsi1sk` (no recipe data) |
 | `RECIPE#<id>` | `COMMENT#<commentId>` | Comment | `text`, `authorId`, `authorName`, `createdAt` |
 | `FAMILY#<id>` | `META` | Family | `name`, `ownerId`, `inviteCode`, `createdAt` |
 | `FAMILY#<id>` | `MEMBER#<sub>` | Membership | `userId`, `displayName`, `joinedAt` |
 | `INVITE#<code>` | `META` | Invite code → family | `familyId` |
 | `RATE#<bucket>#<identity>` | `W#<window start>` | Rate-limit counter | `count`, `expiresAt` (TTL) |
 
-**The index (`gsi1`)** holds the recipe feeds: `gsi1pk = PUBLIC` for public recipes, or `FAMILYFEED#<familyId>` for one family's recipes. `gsi1sk = <createdAt>#<recipeId>` sorts them newest first.
+**The feed index (`gsi1`)** holds the recipe feeds:
+- `gsi1pk = PUBLIC` is on public recipes themselves.
+- `gsi1pk = FAMILYFEED#<familyId>` is on `SHARE` items, one per family a recipe is shared with.
 
-**Access patterns**, each answered by a single key lookup or query:
+`gsi1sk = <createdAt>#<recipeId>` sorts both newest first.
+
+**The author index (`byAuthor`)** is keyed on `authorId` and `createdAt`, attributes every recipe already had. So when the index was added, DynamoDB filled it in for existing recipes on its own, and no backfill script was needed. Comments have the same two attributes, so they're in the index too; the "My recipes" query filters them out with `sk = META`.
+
+**Access patterns**, each answered by a key lookup, a query, or a query plus one batched read:
 
 | Need | How |
 |---|---|
 | Public feed | Query `gsi1` where `gsi1pk = PUBLIC`, newest first, limit 50 |
-| Home feed for a member of N families | N queries (one per `FAMILYFEED#…`), merged and sorted in the Lambda, plus the public query |
-| One family's recipes | Query `gsi1` for `FAMILYFEED#<id>` (members only) |
+| One family's recipes | Query `gsi1` for `FAMILYFEED#<id>` (members only), then BatchGetItem the recipes it points to. Each recipe is checked again (still family-only, still shared with that family) before it's shown. |
+| Home feed for a member of N families | The above for each family, merged, with duplicates removed (one recipe can be in several of your families), sorted in the Lambda; plus the public query |
+| My recipes | Query `byAuthor` for your `authorId`, newest first, keeping only `sk = META` (up to 500) |
 | A recipe and its comments | Get `RECIPE#<id>/META`; query `RECIPE#<id>` with `sk` beginning `COMMENT#` |
 | A family and its members | Get `FAMILY#<id>/META`; query `FAMILY#<id>` with `sk` beginning `MEMBER#` |
 | Join by code | Get `INVITE#<CODE>` → family ID |
@@ -97,6 +105,16 @@ Design notes:
 - **Author names are stored and also looked up.** Each recipe and comment stores the name used when it was written (a fallback, for example if an account is gone). Responses replace it with the author's *current* name from one batched read, so renaming yourself updates the name everywhere at once.
 - **Family changes use transactions.** Creating a family writes the family, the first member, the invite code and the profile's `familyIds` in one `TransactWriteItems`. If any condition fails, for example because you're already at 10 families, nothing is written. This is what stops two simultaneous requests from getting past the rules.
 - **Old data is upgraded on read.** Profiles from before multi-family support held a single `familyId`. They're converted with one conditional `ADD familyIds / REMOVE familyId` update the first time each one is read, so no migration script was needed.
+- **Sharing a recipe with several families uses one `SHARE` item per family.** An item can sit under only one `gsi1pk`, so a recipe can't be in several family feeds by itself.
+  - The share items carry no recipe data, so an edit never has to update copies. A feed reads the recipes they point to, in one batched read.
+  - Creating, editing or re-sharing a recipe writes it, puts a `SHARE` item for every family it's now shared with, and deletes the ones it no longer is, all in one transaction.
+  - Each feed checks every recipe's own `familyIds` before showing it. So even a share left behind by an interrupted or racing change can't show a recipe to a family it isn't shared with.
+- **Recipes from before multi-family sharing still work, and upgrade when written.** Those hold one `familyId` and sit in their family's feed themselves (`gsi1pk = FAMILYFEED#…`) with no `SHARE` item.
+  - Reads accept both forms (`recipe_family_ids()`), and both show up in the same feed query.
+  - The next edit or share by the author rewrites the recipe in the new form, with its `SHARE` items.
+  - Unlike profiles, recipes aren't converted on read, so plain page views never cause writes.
+- **Who sees which families.** The author sees every family a recipe is shared with. Everyone else sees only the families they're in themselves (`present()`), so a recipe never reveals the names of other families it's shared with. Comments are per recipe, so members of all its families see all its comments; the Privacy Policy says so.
+- **Families the author has left** can stay on a recipe, or be removed from it, but can't be added again. New shares must be families you're in now.
 - **Rate-limit counters expire automatically** through DynamoDB TTL, at no cost.
 - **Retention.** The table and the Cognito user pool use `RemovalPolicy.RETAIN`: deleting the stack, or a change that would replace them, leaves the real data in place. Everything else is rebuildable and is deleted with the stack.
 
@@ -210,7 +228,7 @@ A record of the less obvious choices, so future changes start from the reasoning
 | 3 | ID token (not access token) sent to the API | It carries `email` and `name`, which profile creation uses, and the API Gateway authorizer accepts it. | You add OAuth scopes. |
 | 4 | Single DynamoDB table | Few, known access patterns; cheapest and fastest; transactions span item types. | Many ad-hoc queries or reporting are needed: add an analytics export rather than changing the main table. |
 | 5 | Up to 10 families per account | Keeps the Home feed to ≤ 11 queries per load. The limit is enforced inside the transaction. | People hit it. |
-| 6 | Publishing *moves* a recipe (family → public) instead of copying it | Comments stay in one place, with no duplicate to keep in sync. | People want both versions. |
+| 6 | Publishing *moves* a recipe (family → public) instead of copying it. "Share to Public" still works this way; a recipe is either public or shared with some families. | Comments stay in one place, with no duplicate to keep in sync. | People want both versions. |
 | 7 | Hash routing | No server-side rewrite rules needed on S3 and CloudFront. | You need search-engine-friendly URLs for public recipes (pre-render or add rewrites). |
 | 8 | No frontend framework or build | The owner's choice; fewer moving parts and dependencies to update. | The UI grows a lot. A small framework plus a bundler would then pay off. |
 | 9 | CloudFront Function for redirects | Lambda@Edge isn't allowed in this project; CloudFront Functions are cheaper anyway. | Never, for redirects. |
@@ -221,3 +239,5 @@ A record of the less obvious choices, so future changes start from the reasoning
 | 14 | A local stand-in for Cognito (SQLite) instead of a cloud test pool | It works offline and costs nothing. It speaks the same API shapes, so the site code is unchanged. | You need a feature the stand-in doesn't fake (MFA, for example). |
 | 15 | Lambda bundling with pip platform wheels instead of Docker | No Docker on the development PC. pip downloads Linux ARM64 wheels directly. Docker is the fallback. | A dependency without prebuilt wheels is added. |
 | 16 | support@ received by SES and forwarded by a Lambda, instead of a free forwarding service or a hosted mailbox | Privacy and deletion requests stay with AWS, the only processor the Privacy Policy names. It costs cents, it's all in CDK, and it lays the groundwork for sending through SES. The trade-off: replies come from the inbox's own address, not support@. | You need to reply as support@ (add a sending path after SES production access), or want a real shared mailbox. |
+| 17 | One `SHARE` item per family a recipe is shared with, holding no recipe data, rather than a copy of the recipe per family | One recipe, one set of comments, edits in one place. The price is one extra batched read per family feed. | Feeds get slow at large sizes: copy the card fields (title, author, date) onto `SHARE` items. |
+| 18 | A `byAuthor` index on existing attributes, rather than per-author link items | DynamoDB indexes existing recipes automatically; link items would have needed a one-off backfill run against production. Comments ride along, filtered out. | You need "my comments" too (it's already indexed), or the index grows costly. |

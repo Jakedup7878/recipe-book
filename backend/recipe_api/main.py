@@ -7,12 +7,16 @@ claims arrive in the event at requestContext.authorizer.jwt.claims.
 
 Single-table layout (pk / sk):
   USER#<sub>        PROFILE              account profile, holds familyIds (a string set)
-  RECIPE#<id>       META                 recipe; gsi1pk = PUBLIC | FAMILYFEED#<familyId>
+  RECIPE#<id>       META                 recipe; family-only ones hold familyIds; gsi1pk = PUBLIC if public
+  RECIPE#<id>       SHARE#<familyId>     puts a family-only recipe in one family's feed (gsi1pk = FAMILYFEED#<id>)
   RECIPE#<id>       COMMENT#<commentId>  comment on a recipe
   FAMILY#<id>       META                 family name, owner, invite code
   FAMILY#<id>       MEMBER#<sub>         family membership
   INVITE#<code>     META                 invite code -> familyId
   RATE#...          W#<window>           rate limiter counters (TTL)
+
+Indexes: gsi1 (gsi1pk, gsi1sk) holds the feeds; byAuthor (authorId, createdAt)
+finds everything one account wrote (recipes, and comments, which are skipped).
 """
 
 import datetime
@@ -23,7 +27,7 @@ import uuid
 from typing import Annotated, Literal
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -37,6 +41,7 @@ import ratelimit
 IN_LAMBDA = "AWS_LAMBDA_FUNCTION_NAME" in os.environ
 TABLE = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
 FEED_LIMIT = 50
+MY_RECIPES_LIMIT = 500  # "My recipes" has no paging yet
 MAX_FAMILIES = 10  # per account; keeps the home feed to a handful of queries
 INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -103,6 +108,10 @@ class ProfileUpdate(BaseModel):
     displayName: text(40)
 
 
+# A recipe can be shared with at most as many families as one account can be in.
+FamilyChoice = Annotated[list[text(64)], Field(max_length=MAX_FAMILIES)] | None
+
+
 HexColor = Annotated[str, StringConstraints(pattern=r"^#[0-9a-fA-F]{6}$")]
 
 
@@ -145,8 +154,15 @@ class RecipeIn(BaseModel):
     ingredients: lines(500)
     steps: lines(2000)
     visibility: Literal["public", "family"] = "public"
-    familyId: str | None = Field(None, description="Which of your families can see a family-only recipe. "
-                                                   "Optional when you're in exactly one family.")
+    familyIds: FamilyChoice = Field(None, description="Which of your families can see a family-only recipe. "
+                                                      "Optional when you're in exactly one family, and when "
+                                                      "editing (it then stays shared as it is).")
+    familyId: str | None = Field(None, description="Deprecated: one family, the same as familyIds=[familyId].")
+
+
+class Sharing(BaseModel):
+    visibility: Literal["public", "family"]
+    familyIds: FamilyChoice = Field(None, description="For family-only: the families that can see it.")
 
 
 class Recipe(BaseModel):
@@ -156,7 +172,9 @@ class Recipe(BaseModel):
     ingredients: list[str]
     steps: list[str]
     visibility: Literal["public", "family"]
-    familyId: str | None = None
+    familyIds: list[str] = Field(default_factory=list,
+                                 description="The families a family-only recipe is shared with: all of them for "
+                                             "its author, only your own for everyone else.")
     authorId: str
     authorName: str
     createdAt: str
@@ -294,17 +312,8 @@ def with_current_names(items):
     fallback (e.g. for a deleted account); this looks up every distinct
     author's profile in one batched read so renames show up everywhere.
     """
-    author_ids = list({item["authorId"] for item in items})
-    names = {}
-    for start in range(0, len(author_ids), 100):  # BatchGetItem takes up to 100 keys
-        request = {TABLE.name: {
-            "Keys": [{"pk": f"USER#{a}", "sk": "PROFILE"} for a in author_ids[start:start + 100]],
-            "ProjectionExpression": "userId, displayName",
-        }}
-        while request:
-            response = TABLE.meta.client.batch_get_item(RequestItems=request)
-            names.update({p["userId"]: p["displayName"] for p in response["Responses"].get(TABLE.name, [])})
-            request = response.get("UnprocessedKeys") or None
+    keys = [{"pk": f"USER#{a}", "sk": "PROFILE"} for a in {item["authorId"] for item in items}]
+    names = {p["userId"]: p["displayName"] for p in batch_get(keys, ProjectionExpression="userId, displayName")}
     return [{**item, "authorName": names.get(item["authorId"], item["authorName"])} for item in items]
 
 
@@ -408,12 +417,28 @@ def load_recipe(recipe_id):
     return item
 
 
+def own_recipe(recipe_id, profile, action):
+    recipe = load_recipe(recipe_id)
+    if recipe["authorId"] != profile["userId"]:
+        raise ApiError(403, f"Only the author can {action} this recipe.")
+    return recipe
+
+
+def recipe_family_ids(recipe):
+    """The families a family-only recipe is shared with. Recipes saved before
+    recipes could be shared with several families hold one `familyId` instead."""
+    shared = set(recipe.get("familyIds") or ())
+    if recipe.get("familyId"):
+        shared.add(recipe["familyId"])
+    return shared
+
+
 def can_view(recipe, profile):
     if recipe["visibility"] == "public":
         return True
     if profile is None:
         return False
-    return recipe["authorId"] == profile["userId"] or recipe.get("familyId") in family_ids(profile)
+    return recipe["authorId"] == profile["userId"] or bool(recipe_family_ids(recipe) & family_ids(profile))
 
 
 def visible_recipe(recipe_id, profile):
@@ -424,24 +449,80 @@ def visible_recipe(recipe_id, profile):
     return recipe
 
 
-def recipe_family(recipe_in: RecipeIn, profile):
-    """The family a recipe is shared with: None for public, else one of the author's families."""
-    if recipe_in.visibility == "public":
-        return None
+def present(recipes, profile):
+    """Recipes as `profile` may see them, with current author names. Only the author
+    learns every family a recipe is shared with; other members see only their own."""
+    viewer_families = family_ids(profile) if profile else set()
+    shown = []
+    for recipe in with_current_names(recipes):
+        shared = recipe_family_ids(recipe)
+        if not profile or recipe["authorId"] != profile["userId"]:
+            shared &= viewer_families
+        shown.append({**recipe, "familyIds": sorted(shared)})
+    return shown
+
+
+def chosen_families(visibility, requested, profile, recipe=None):
+    """The families a recipe will be shared with: none for public, else some of the author's.
+
+    `requested` None keeps the families an existing recipe is shared with, or picks the
+    author's only family. Families the recipe is already shared with may be kept (or
+    dropped) even after the author has left them; new ones must be the author's own.
+    """
+    if visibility == "public":
+        return set()
     mine = family_ids(profile)
-    if not mine:
-        raise ApiError(400, "Join or create a family before sharing a recipe with family only.")
-    if recipe_in.familyId is None:
+    current = recipe_family_ids(recipe) if recipe and recipe["visibility"] == "family" else set()
+    if requested is None:
+        if current:
+            return current
+        if not mine:
+            raise ApiError(400, "Join or create a family before sharing a recipe with family only.")
         if len(mine) > 1:
             raise ApiError(400, "Choose which of your families can see this recipe.")
-        return next(iter(mine))
-    if recipe_in.familyId not in mine:
-        raise ApiError(400, "You can only share family recipes with a family you're in.")
-    return recipe_in.familyId
+        return set(mine)
+    requested = set(requested)
+    if not requested:
+        raise ApiError(400, "Choose at least one family to share this recipe with.")
+    if not requested <= mine | current:
+        raise ApiError(400, "You can only share family recipes with families you're in.")
+    return requested
 
 
-def feed_key(family_id):
-    return f"FAMILYFEED#{family_id}" if family_id else "PUBLIC"
+def requested_families(recipe_in: RecipeIn):
+    if recipe_in.familyIds is None and recipe_in.familyId:
+        return [recipe_in.familyId]  # the older one-family form
+    return recipe_in.familyIds
+
+
+def with_sharing(item, visibility, families):
+    """`item` with its visibility set: public recipes are in the PUBLIC feed; family-only
+    ones list their families (each family's feed entry is a separate SHARE item)."""
+    item = {k: v for k, v in item.items() if k not in ("familyId", "familyIds", "gsi1pk", "gsi1sk")}
+    item["visibility"] = visibility
+    if families:
+        item["familyIds"] = set(families)
+    else:
+        item.update(gsi1pk="PUBLIC", gsi1sk=f"{item['createdAt']}#{item['recipeId']}")
+    return item
+
+
+def share_item(recipe, family_id):
+    # Holds no recipe data: family feeds read the recipe itself (see family_feed).
+    return {"pk": recipe["pk"], "sk": f"SHARE#{family_id}", "recipeId": recipe["recipeId"], "familyId": family_id,
+            "gsi1pk": f"FAMILYFEED#{family_id}", "gsi1sk": f"{recipe['createdAt']}#{recipe['recipeId']}"}
+
+
+def save_recipe(item, previous_families, condition):
+    """Writes the recipe and its SHARE items in one transaction. Every current share is
+    (re)written, which also upgrades recipes saved before SHARE items existed."""
+    families = item.get("familyIds", set())
+    transact([
+        {"Put": {"TableName": TABLE.name, "Item": item, **condition}},
+        *[{"Put": {"TableName": TABLE.name, "Item": share_item(item, f)}} for f in sorted(families)],
+        *[{"Delete": {"TableName": TABLE.name, "Key": {"pk": item["pk"], "sk": f"SHARE#{f}"}}}
+          for f in sorted(previous_families - families)],
+    ], "This recipe changed while you were saving it. Try again.")
 
 
 def query_feed(partition):
@@ -453,71 +534,121 @@ def query_feed(partition):
     )["Items"]
 
 
-def recipe_fields(recipe_in: RecipeIn, family_id):
-    fields = recipe_in.model_dump(exclude={"familyId"})
-    return {**fields, "familyId": family_id} if family_id else fields
+def batch_get(keys, **options):
+    """BatchGetItem for any number of keys (it takes up to 100 at a time), retrying unprocessed ones."""
+    items = []
+    for start in range(0, len(keys), 100):
+        request = {TABLE.name: {"Keys": keys[start:start + 100], **options}}
+        while request:
+            response = TABLE.meta.client.batch_get_item(RequestItems=request)
+            items += response["Responses"].get(TABLE.name, [])
+            request = response.get("UnprocessedKeys") or None
+    return items
+
+
+def family_feed(family_id):
+    """Newest family-only recipes shared with one family.
+
+    The feed index holds SHARE items (and, for recipes saved before those existed, the
+    recipe itself). Each recipe is read and checked again, so a share left behind by
+    an interrupted change can never show a recipe to a family it isn't shared with.
+    """
+    ids = list(dict.fromkeys(entry["recipeId"] for entry in query_feed(f"FAMILYFEED#{family_id}")))
+    found = {r["recipeId"]: r for r in batch_get([{"pk": f"RECIPE#{i}", "sk": "META"} for i in ids])}
+    return [found[i] for i in ids
+            if i in found and found[i]["visibility"] == "family" and family_id in recipe_family_ids(found[i])]
+
+
+def newest_first(recipes):
+    return sorted(recipes, key=lambda r: (r["createdAt"], r["recipeId"]), reverse=True)
 
 
 @app.post("/recipes", response_model=Recipe, status_code=201, tags=["recipes"])
 def create_recipe(recipe_in: RecipeIn, profile: Writer):
-    family_id = recipe_family(recipe_in, profile)
+    families = chosen_families(recipe_in.visibility, requested_families(recipe_in), profile)
     recipe_id = uuid.uuid4().hex
     created = now_iso()
-    item = {
+    item = with_sharing({
         "pk": f"RECIPE#{recipe_id}",
         "sk": "META",
         "recipeId": recipe_id,
-        **recipe_fields(recipe_in, family_id),
+        **recipe_in.model_dump(exclude={"visibility", "familyIds", "familyId"}),
         "authorId": profile["userId"],
         "authorName": profile["displayName"],
         "createdAt": created,
         "updatedAt": created,
-        "gsi1pk": feed_key(family_id),
-        "gsi1sk": f"{created}#{recipe_id}",
-    }
-    TABLE.put_item(Item=item)
-    return item
+    }, recipe_in.visibility, families)
+    save_recipe(item, set(), {"ConditionExpression": "attribute_not_exists(pk)"})
+    return present([item], profile)[0]
 
 
 @app.get("/recipes", response_model=Feed, tags=["recipes"],
          summary="Family recipes from all your families, and public recipes, as separate lists, newest first")
 def list_recipes(profile: Reader):
-    family = [r for family_id in family_ids(profile) for r in query_feed(f"FAMILYFEED#{family_id}")]
-    family = sorted(family, key=lambda r: r["gsi1sk"], reverse=True)[:FEED_LIMIT]
+    # A recipe shared with several of your families is listed once.
+    family = {r["recipeId"]: r for family_id in family_ids(profile) for r in family_feed(family_id)}
+    family = newest_first(family.values())[:FEED_LIMIT]
     public = query_feed("PUBLIC")
-    named = with_current_names(family + public)
-    return {"family": named[:len(family)], "public": named[len(family):]}
+    shown = present(family + public, profile)
+    return {"family": shown[:len(family)], "public": shown[len(family):]}
+
+
+@app.get("/me/recipes", response_model=RecipeList, tags=["recipes"],
+         summary="Every recipe you've written, public and family-only, newest first")
+def my_recipes(profile: Reader):
+    recipes, page = [], {}
+    while len(recipes) < MY_RECIPES_LIMIT:
+        result = TABLE.query(
+            IndexName="byAuthor",
+            KeyConditionExpression=Key("authorId").eq(profile["userId"]),
+            FilterExpression=Attr("sk").eq("META"),  # the index also holds your comments
+            ScanIndexForward=False,
+            **page,
+        )
+        recipes += result["Items"]
+        if "LastEvaluatedKey" not in result:
+            break
+        page = {"ExclusiveStartKey": result["LastEvaluatedKey"]}
+    return {"recipes": present(newest_first(recipes)[:MY_RECIPES_LIMIT], profile)}
 
 
 @app.get("/recipes/{id}", response_model=Recipe, tags=["recipes"])
 def get_recipe(id: str, profile: Reader):
-    return with_current_names([visible_recipe(id, profile)])[0]
+    return present([visible_recipe(id, profile)], profile)[0]
 
 
 @app.put("/recipes/{id}", response_model=Recipe, tags=["recipes"])
 def update_recipe(id: str, recipe_in: RecipeIn, profile: Writer):
-    recipe = load_recipe(id)
-    if recipe["authorId"] != profile["userId"]:
-        raise ApiError(403, "Only the author can edit this recipe.")
-    # Editing a family recipe without naming a family keeps it in the one it's in,
-    # even if the author has joined more families since.
-    keep_family = recipe.get("familyId") in family_ids(profile)
-    if recipe_in.visibility == "family" and recipe_in.familyId is None and keep_family:
-        recipe_in = recipe_in.model_copy(update={"familyId": recipe["familyId"]})
-    # Changing visibility to "public" is how an author publishes a family recipe to everyone.
-    family_id = recipe_family(recipe_in, profile)
-    recipe.pop("familyId", None)
-    recipe.update(recipe_fields(recipe_in, family_id), updatedAt=now_iso(), authorName=profile["displayName"],
-                  gsi1pk=feed_key(family_id))
-    TABLE.put_item(Item=recipe)
-    return recipe
+    recipe = own_recipe(id, profile, "edit")
+    families = chosen_families(recipe_in.visibility, requested_families(recipe_in), profile, recipe)
+    item = with_sharing({
+        **recipe,
+        **recipe_in.model_dump(exclude={"visibility", "familyIds", "familyId"}),
+        "authorName": profile["displayName"],
+        "updatedAt": now_iso(),
+    }, recipe_in.visibility, families)
+    save_recipe(item, recipe_family_ids(recipe), {"ConditionExpression": "authorId = :a",
+                                                  "ExpressionAttributeValues": {":a": profile["userId"]}})
+    return present([item], profile)[0]
+
+
+@app.put("/recipes/{id}/sharing", response_model=Recipe, tags=["recipes"],
+         summary="Share a recipe with everyone, or with some of your families (author only)")
+def share_recipe(id: str, sharing: Sharing, profile: Writer):
+    # Sharing "public" is how an author publishes a family recipe to everyone; it then
+    # leaves its families' feeds (their members still see it under Public recipes).
+    recipe = own_recipe(id, profile, "share")
+    families = chosen_families(sharing.visibility, sharing.familyIds, profile, recipe)
+    item = with_sharing(recipe, sharing.visibility, families)
+    save_recipe(item, recipe_family_ids(recipe), {"ConditionExpression": "authorId = :a",
+                                                  "ExpressionAttributeValues": {":a": profile["userId"]}})
+    return present([item], profile)[0]
 
 
 @app.delete("/recipes/{id}", status_code=204, response_class=Response, tags=["recipes"])
 def delete_recipe(id: str, profile: Writer):
-    recipe = load_recipe(id)
-    if recipe["authorId"] != profile["userId"]:
-        raise ApiError(403, "Only the author can delete this recipe.")
+    # Removes the recipe with everything under it: comments and SHARE items.
+    recipe = own_recipe(id, profile, "delete")
     keys = TABLE.query(
         KeyConditionExpression=Key("pk").eq(recipe["pk"]),
         ProjectionExpression="pk, sk",
@@ -714,10 +845,10 @@ def rename_family(familyId: str, rename: FamilyRename, profile: Writer):
 
 
 @app.get("/families/{familyId}/recipes", response_model=RecipeList, tags=["families"],
-         summary="One family's family-only recipes, newest first (members only)")
+         summary="The family-only recipes shared with one family, newest first (members only)")
 def family_recipes(familyId: str, profile: Reader):
     require_family(profile, familyId)
-    return {"recipes": with_current_names(query_feed(f"FAMILYFEED#{familyId}"))}
+    return {"recipes": present(family_feed(familyId), profile)}
 
 
 @app.post("/families/{familyId}/leave", response_model=MyFamilies, tags=["families"],
@@ -789,12 +920,12 @@ def upgrade_profile_by_id(user_id):
 
 @app.get("/public/recipes", response_model=RecipeList, tags=["public"], dependencies=[Depends(anonymous)])
 def public_list():
-    return {"recipes": with_current_names(query_feed("PUBLIC"))}
+    return {"recipes": present(query_feed("PUBLIC"), None)}
 
 
 @app.get("/public/recipes/{id}", response_model=Recipe, tags=["public"], dependencies=[Depends(anonymous)])
 def public_get(id: str):
-    return with_current_names([visible_recipe(id, None)])[0]
+    return present([visible_recipe(id, None)], None)[0]
 
 
 @app.get("/public/recipes/{id}/comments", response_model=CommentList, tags=["public"],

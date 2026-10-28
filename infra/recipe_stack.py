@@ -78,11 +78,13 @@ ROUTES = [
     ("/me", "GET", True),
     ("/me", "PUT", True),
     ("/me/preferences", "PUT", True),
+    ("/me/recipes", "GET", True),
     ("/recipes", "GET", True),
     ("/recipes", "POST", True),
     ("/recipes/{id}", "GET", True),
     ("/recipes/{id}", "PUT", True),
     ("/recipes/{id}", "DELETE", True),
+    ("/recipes/{id}/sharing", "PUT", True),
     ("/recipes/{id}/comments", "GET", True),
     ("/recipes/{id}/comments", "POST", True),
     ("/recipes/{id}/comments/{commentId}", "DELETE", True),
@@ -144,11 +146,22 @@ class RecipeBookStack(Stack):
             sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
             billing=dynamodb.Billing.on_demand(),
             time_to_live_attribute="expiresAt",
-            global_secondary_indexes=[dynamodb.GlobalSecondaryIndexPropsV2(
-                index_name="gsi1",
-                partition_key=dynamodb.Attribute(name="gsi1pk", type=dynamodb.AttributeType.STRING),
-                sort_key=dynamodb.Attribute(name="gsi1sk", type=dynamodb.AttributeType.STRING),
-            )],
+            global_secondary_indexes=[
+                # Feeds: PUBLIC, and one FAMILYFEED#<familyId> per family.
+                dynamodb.GlobalSecondaryIndexPropsV2(
+                    index_name="gsi1",
+                    partition_key=dynamodb.Attribute(name="gsi1pk", type=dynamodb.AttributeType.STRING),
+                    sort_key=dynamodb.Attribute(name="gsi1sk", type=dynamodb.AttributeType.STRING),
+                ),
+                # "My recipes". Keyed on attributes every recipe already has, so DynamoDB fills
+                # it in for existing recipes when it's added (CloudFormation adds one index per
+                # deploy). Add any further index in a deploy of its own.
+                dynamodb.GlobalSecondaryIndexPropsV2(
+                    index_name="byAuthor",
+                    partition_key=dynamodb.Attribute(name="authorId", type=dynamodb.AttributeType.STRING),
+                    sort_key=dynamodb.Attribute(name="createdAt", type=dynamodb.AttributeType.STRING),
+                ),
+            ],
             removal_policy=RemovalPolicy.RETAIN,
         )
 
