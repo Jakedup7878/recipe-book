@@ -210,7 +210,7 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 **Why:** One definition of the table shape outside the CDK. If tests and local dev each built their own table, they could drift apart.
 
 ### `backend/requirements-dev.txt`
-**What:** Everything needed to test and run locally: the Lambda requirements plus `boto3`, `uvicorn`, `httpx`, `pytest`, `pyyaml` and `moto[dynamodb]`.
+**What:** Everything needed to test and run locally: the Lambda requirements plus `boto3`, `uvicorn`, `httpx`, `pytest`, `pyyaml` and `moto[dynamodb]`, and the two security scanners, `pip-audit` and `bandit`, pinned to exact versions.
 
 **Why:** It's separate from the Lambda requirements, so test tools are never shipped to production. `-r recipe_api/requirements.txt` keeps the shared versions identical.
 
@@ -367,22 +367,33 @@ Bundling is skipped via CDK context so the tests run fast.
 **Why:** Mistakes in infrastructure can be expensive, for example losing data with the wrong removal policy, or a broken domain. These catch them before a deploy.
 
 ### `infra/tests/test_pipeline_stack.py`
-**What:** Checks four things:
+**What:** Checks five things:
 - the stage order, with the manual approval before Deploy;
 - only Deploy can use CDK's deploy roles, and Synth only the lookup role;
 - the builds use the ARM image and the buildspec files from the repository;
-- the buildspec files exist and are valid YAML.
+- the buildspec files exist and are valid YAML;
+- the Test stage runs both security scans on the production code, with no `||` or `--exit-zero` that would make them always pass, and both scanners are pinned in `backend/requirements-dev.txt`.
 
-**Why:** The permission split is the pipeline's main safety property, so it's tested.
+**Why:** The permission split is the pipeline's main safety property, so it's tested. The scans are a gate before every deploy, and a gate that's quietly removed looks exactly like one that passes, so that's tested too.
 
 ---
 
 ## `pipeline/`: CodeBuild steps
 
 ### `pipeline/buildspec-test.yml`
-**What:** Installs Python 3.13 and Node 24 plus the development requirements, then runs `pytest` on `backend/tests` and `infra/tests` and publishes a JUnit test report, which you can view in CodeBuild.
+**What:** Installs Python 3.13 and Node 24 plus the development requirements, then:
+- runs `pytest` on `backend/tests` and `infra/tests`, and publishes a JUnit test report you can view in CodeBuild;
+- runs the two security scans:
+  - **pip-audit** on `backend/recipe_api/requirements.txt`, the packages that ship in the Lambda;
+  - **bandit**, at medium severity and above, on `backend/recipe_api` and `backend/mail_forwarder`.
 
-**Why:** Node is installed so the frontend syntax checks run instead of being skipped. The JUnit report gives a per-test history in the console.
+**Why:**
+- Node is installed so the frontend syntax checks run instead of being skipped. The JUnit report gives a per-test history in the console.
+- **Why scan here:**
+  - A failure stops the run before the approval step, so nothing with a known-vulnerable dependency or a new risky pattern can be approved by accident.
+  - **pip-audit covers only what ships to production.** The build tools (CDK, pytest) never handle user data, and auditing them too would block deploys over issues that can't reach the site.
+  - **bandit skips low-severity findings**, which are mostly noise.
+- What to do when a scan fails is in [operations.md §3](operations.md#3-run-the-tests).
 
 ### `pipeline/buildspec-synth.yml`
 **What:** Installs the CDK, runs `cdk synth RecipeBook --strict --quiet` into `cdk.out`, then `cdk diff` against what's deployed, and saves `cdk.out` as the stage's output.

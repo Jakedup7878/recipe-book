@@ -5,3 +5,6 @@ httpx
 pytest==8.4.2
 pyyaml
 moto[dynamodb]==5.1.14
+# Security scans, run by the pipeline's Test stage (pipeline/buildspec-test.yml).
+pip-audit==2.10.1
+bandit==1.9.4

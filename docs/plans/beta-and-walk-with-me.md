@@ -76,7 +76,7 @@ In `infra/pipeline_stack.py`:
 
 ### Step 5: write a test first
 
-In `infra/tests/`, synthesize the pipeline stack (see how `test_recipe_stack.py` synthesizes the app stack) and assert:
+Add to `infra/tests/test_pipeline_stack.py`, which already synthesizes the pipeline stack and checks its stages, and assert:
 - there are two `AWS::CodePipeline::Pipeline` resources;
 - the beta pipeline has no `Approve` stage;
 - the production pipeline's logical ID still starts with `Pipeline`.

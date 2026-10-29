@@ -125,9 +125,9 @@ Design notes:
 | Action | Allowed for |
 |---|---|
 | Read public recipes and their comments | Anyone, including signed-out visitors (per-IP rate limit) |
-| Read a family recipe | Its author, and members of the family it belongs to. Anyone else gets **404, not 403**, so family recipes can't be discovered by guessing IDs. |
-| Create a recipe | Any signed-in account. A family recipe must name a family you're in (optional when you're in exactly one). |
-| Edit, delete, or publish a recipe | Its author |
+| Read a family recipe | Its author, and members of any family it's shared with. Anyone else gets **404, not 403**, so family recipes can't be discovered by guessing IDs. Members see only their own families' names on it. |
+| Create a recipe | Any signed-in account. A family recipe must be shared with families you're in (naming them is optional when you're in exactly one). |
+| Edit, delete, or share a recipe (Share to Public / Share to Family) | Its author. Sharing can add only families the author is in now; families they've left can be kept or removed. |
 | Comment | Anyone who can see the recipe |
 | Delete a comment | The comment's author, or the recipe's author |
 | Rename a family, make a new invite code, remove a member | The family owner |
@@ -143,6 +143,16 @@ Design notes:
 - **Security headers** (CloudFront response headers policy): CSP; `X-Content-Type-Options: nosniff`; `X-Frame-Options: DENY` plus `frame-ancestors 'none'` against clickjacking; `Referrer-Policy: strict-origin-when-cross-origin`; HSTS for one year, including subdomains.
 - **CORS** allows only `https://familyfoodiebook.com`.
 - **Input validation**: every request body is a pydantic model with length limits. Appearance preferences reject unknown fields, and colors must be `#rrggbb`, which stops CSS injection through saved colors.
+- **Injection.**
+  - There's no SQL, so classic SQL injection can't happen.
+  - DynamoDB's equivalent is prevented the same way parameterized SQL prevents it: every expression (`KeyConditionExpression`, `UpdateExpression`, `ConditionExpression`…) is fixed text. User input reaches DynamoDB only as `:placeholder` values or through boto3's `Key()`/`Attr()` helpers, never inside the expression.
+  - IDs from the URL go only into key values with a fixed prefix (`RECIPE#…`), so a crafted ID can only miss.
+  - Pydantic's type checks reject a JSON object where a string is expected, so MongoDB-style operator tricks like `{"$ne": null}` don't apply.
+  - There's no shell, `eval` or `pickle` in the code that runs in AWS.
+- **Automated scanning on every pipeline run** (Test stage, before approval). See [operations.md §3](operations.md#3-run-the-tests).
+  - **pip-audit** checks the packages that ship in the Lambda against known-vulnerability databases.
+  - **bandit** checks the production Python for risky patterns.
+  - A finding fails the run.
 - **Least privilege**:
   - The Lambda can only read and write its own table.
   - The S3 bucket is private and requires TLS.

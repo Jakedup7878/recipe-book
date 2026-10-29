@@ -1,4 +1,5 @@
-# CodeBuild: Test stage. Runs the backend, frontend and infrastructure tests.
+# CodeBuild: Test stage. Runs the backend, frontend and infrastructure tests,
+# then two security scans; any failure stops the run before the approval step.
 # Node.js is installed so the frontend syntax checks run instead of skipping.
 version: 0.2
 
@@ -17,6 +18,11 @@ phases:
     commands:
       - cd "$CODEBUILD_SRC_DIR"
       - python -m pytest backend/tests infra/tests -q --junitxml=test-results.xml
+      # Known vulnerabilities in the packages that ship in the Lambda, resolved the way the
+      # Lambda build resolves them. To accept one temporarily, see docs/operations.md section 3.
+      - python -m pip_audit -r backend/recipe_api/requirements.txt --progress-spinner off
+      # Risky patterns (medium and high severity) in the Python that runs in production.
+      - python -m bandit -r backend/recipe_api backend/mail_forwarder -q --severity-level medium
 
 reports:
   recipe-book-tests:

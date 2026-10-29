@@ -2,6 +2,34 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-29: Security scanning in the pipeline
+
+### What changed
+
+- **The pipeline's Test stage runs two security scanners** after the tests. Either one failing stops the run before the approval step, so nothing can be approved while a scan is failing.
+  - **pip-audit 2.10.1** checks the packages that ship in the Lambda (FastAPI, Mangum, pydantic and everything they pull in) against public vulnerability databases. It resolves them the same way the Lambda build does.
+  - **bandit 1.9.4** checks the Python that runs in AWS (`backend/recipe_api`, `backend/mail_forwarder`) for risky patterns, failing on medium and high severity.
+  - Both versions had been released for months before they were pinned. For security tools, a release that has been public for a while is less likely to be broken or compromised.
+- **Both scans were clean when added:** no known vulnerabilities, and no bandit findings at any severity. So a future failure always means something new.
+- **Before adding the scans, the code was checked for injection.**
+  - There's no SQL or PartiQL anywhere.
+  - Every DynamoDB expression is fixed text, with input only as `:placeholder` values.
+  - No user text is inserted as HTML in the browser, and there's no shell or `eval` in the code that runs in AWS.
+- **Docs:**
+  - [docs/operations.md](docs/operations.md) §3 has the local commands, and what to do when a scan fails: upgrade the package, or, only if there's no fix yet, accept it temporarily with `--ignore-vuln` and a dated reason. It also gets a troubleshooting row.
+  - [docs/architecture.md](docs/architecture.md) §4 gets an injection section, and its access table now matches multi-family sharing (it still described one family per recipe).
+  - [docs/files.md](docs/files.md) describes the new scan step and test.
+
+### Tests
+
+- New `test_test_stage_runs_the_security_scans_and_fails_on_findings` (in `infra/tests/test_pipeline_stack.py`). It fails if:
+  - either scan is removed from the Test stage;
+  - a scan is made to always pass (`||` or `--exit-zero`);
+  - either scanner is no longer pinned.
+
+  To check that the test works, I added `|| true` to the bandit command, saw the test fail, and restored the file.
+- Full suite: 72 passed.
+
 ## 2026-10-27: Share a recipe with several families; My recipes
 
 ### What changed for people using the site

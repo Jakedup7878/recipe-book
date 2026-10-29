@@ -41,7 +41,29 @@ infra\.venv\Scripts\python.exe backend\local_dev.py
 infra\.venv\Scripts\python.exe -m pytest backend/tests infra/tests -q
 ```
 
-There are 66 tests: API behavior, route parity between the gateway and FastAPI, frontend checks, the local dev server, the support@ mail forwarder, and both CDK stacks. The pipeline runs the same command; Node.js must be installed or the two JavaScript syntax checks are skipped.
+There are 72 tests: API behavior, route parity between the gateway and FastAPI, frontend checks, the local dev server, the support@ mail forwarder, and both CDK stacks. The pipeline runs the same command; Node.js must be installed or the two JavaScript syntax checks are skipped.
+
+### Security scans
+
+The pipeline's Test stage also runs two scanners after the tests. Either one failing stops the run before the approval step. Run them locally the same way:
+
+```
+infra\.venv\Scripts\python.exe -m pip_audit -r backend/recipe_api/requirements.txt --progress-spinner off
+infra\.venv\Scripts\python.exe -m bandit -r backend/recipe_api backend/mail_forwarder -q --severity-level medium
+```
+
+(Install them first with `infra\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt`.)
+
+- **pip-audit** resolves the Lambda's packages (FastAPI, Mangum, pydantic, and everything they pull in) the same way the Lambda build does, and looks each one up in the public vulnerability databases. It needs internet access.
+- **bandit** reads the Python that runs in AWS (`backend/recipe_api`, `backend/mail_forwarder`) for risky patterns such as shell calls, `eval` or weak hashing. The build fails on medium and high findings. Low findings, mostly noise like an empty `except`, are not checked.
+- Both were clean when they were added on 2026-10-29. So a failure always means something new: a newly published vulnerability, or a new risky pattern in the code.
+
+**When pip-audit fails:**
+1. Read the advisory it names (`GHSA-…` or `PYSEC-…`), and the version that fixes it.
+2. Raise that package's version, in `backend/recipe_api/requirements.txt` if it's listed there. If it's a package that FastAPI or pydantic pulls in, raise FastAPI or pydantic to a release that requires the fixed version. Run the tests, and ship it.
+3. Only if no fix exists yet and the advisory doesn't affect how this app uses the package, accept it temporarily. Add `--ignore-vuln <ID>` to the command in `pipeline/buildspec-test.yml`, with a comment saying why and the date to look again. Never remove the scan instead; `infra/tests/test_pipeline_stack.py` fails if the scan is removed or made to always pass.
+
+**When bandit fails:** fix the code it points at. If the finding is a false positive, add `# nosec B<number>` on that line, with a short reason after it, so a reviewer can see why.
 
 ## 4. Deploy (the normal way: through the pipeline)
 
@@ -170,6 +192,7 @@ Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico` r
 | `git commit -m "…"` cuts the message at quotes in PowerShell 5.1 | PowerShell passes quoted text to Git incorrectly | Write the message to a file and use `git commit -F <file>` |
 | An AWS command in Git Bash says a log group "doesn't exist" | Git Bash rewrites `/aws/...` into a Windows path | Run it with `MSYS_NO_PATHCONV=1`, or use PowerShell |
 | `ExpiredToken` / "credentials expired" / "Your session has expired" | The `aws login` session ended | Run `aws login --profile recipe-book` again. If it then says "The pending authorization … has expired", the browser step took too long; run it again, and it finishes at once while you're still signed in to AWS in the browser. |
+| The Test stage fails after the tests pass, naming a package and a `GHSA-…`/`PYSEC-…` ID, or printing a bandit issue | A security scan found something | See §3, *Security scans* |
 | A page errors right after a deploy; the Lambda log says "Cannot read from backfilling global secondary index" | A new index is still being built (CloudFormation finishes before DynamoDB does) | Wait for the index to show `ACTIVE` (see §4, *Changing the database*). Next time, deploy the index before the code that uses it. |
 | `aws cloudformation describe-stack-resources` doesn't list a resource you know exists | That command returns at most 100 resources, and this stack has more | Use `aws cloudformation list-stack-resources`, which pages through all of them |
 | Push to GitHub asks for credentials or fails | A stale stored credential | Push from a terminal; Git Credential Manager opens a browser sign-in |

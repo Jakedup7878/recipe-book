@@ -82,3 +82,17 @@ def test_buildspec_files_exist_and_are_valid_yaml():
         with open(os.path.join(ROOT, "pipeline", name), encoding="utf-8") as handle:
             spec = yaml.safe_load(handle)
         assert spec["version"] == 0.2 and spec["phases"]["build"]["commands"], name
+
+
+def test_test_stage_runs_the_security_scans_and_fails_on_findings():
+    # The scans gate every deploy; a deleted command, or one made to always pass, would
+    # remove that gate without anything else noticing.
+    with open(os.path.join(ROOT, "pipeline", "buildspec-test.yml"), encoding="utf-8") as handle:
+        commands = yaml.safe_load(handle)["phases"]["build"]["commands"]
+    scans = [c for c in commands if "pip_audit" in c or "bandit" in c]
+    assert any("pip_audit -r backend/recipe_api/requirements.txt" in c for c in scans)
+    assert any("bandit -r backend/recipe_api backend/mail_forwarder" in c for c in scans)
+    assert not any("||" in c or "--exit-zero" in c for c in scans)
+    with open(os.path.join(ROOT, "backend", "requirements-dev.txt"), encoding="utf-8") as handle:
+        pinned = {line.split("==")[0] for line in handle.read().splitlines() if "==" in line}
+    assert {"pip-audit", "bandit"} <= pinned
