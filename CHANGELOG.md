@@ -2,6 +2,45 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-10-29 (afternoon): Installable app (PWA)
+
+### What changed for people using the site
+
+- **The site installs as an app** on Android, iPhone and desktop Chrome/Edge. It gets its own icon and opens full screen, without the browser's address bar.
+  - **Android, Chrome, Edge:** the footer's new **Install the app** opens the browser's install prompt. The browser menu's *Install app* works too.
+  - **iPhone and iPad:** **Install the app** explains Share → *Add to Home Screen*. Apple offers no prompt that a site can open.
+  - The link hides itself where neither applies, and once the app is installed.
+- **It opens without a connection.** The pages, styles, scripts and icons are kept on the device. Recipes still need a connection, and a page that couldn't load says so and **loads by itself when the connection comes back**. Installed apps have no reload button.
+- **Being offline no longer signs you out.** Before, opening the site offline more than an hour after signing in failed the token refresh, and the app then deleted the saved sign-in. Now it keeps it and refreshes once back online.
+- **Clearer offline messages:** "You're offline. Connect to the internet and try again." instead of the browser's "Failed to fetch".
+- **Privacy Policy** (effective October 29, 2026): §6 lists the saved site files, and says they hold no recipes, comments or account details.
+
+### How it works
+
+- `frontend/manifest.json`: the app's name, icons and colors. Its paths are relative, so beta and local dev work too.
+- `frontend/icon-192.png`, `icon-512.png`, `icon-maskable-512.png`: drawn from the favicon's shapes. The maskable one fills the square, with the artwork inside the circle Android always keeps.
+- `frontend/sw.js`, the service worker:
+  - it saves the site's own files (`SHELL`), going **network first**, so deploys still show up on the next load;
+  - API and sign-in requests are never handled or stored;
+  - see [docs/files.md](docs/files.md), and decision 19 in [docs/architecture.md](docs/architecture.md).
+- `app.js` registers the worker after the first page draws, and adds the install link, `NetworkError`, and reloading pages when the connection returns. `confirmDialog()` can now leave out Cancel (`cancelLabel: null`).
+- No infrastructure changes: the existing Content Security Policy (`default-src 'self'`) already allows the manifest and the worker. The Synth diff should show only the `DeploySite` asset changing.
+
+### Tests
+
+- New `backend/tests/service_worker.test.js` runs `sw.js` against a fake browser in Node, and `test_frontend.py` runs it. Removing the worker's address check made two of its tests fail, and the check was restored.
+- New in `test_frontend.py`:
+  - the manifest is installable, and its icon sizes and colors match;
+  - `SHELL` lists every frontend file;
+  - an offline token refresh keeps the sign-in;
+  - `sw.js` parses.
+- **Checked in a browser on the local dev server:**
+  1. the worker activated and saved exactly the 15 `SHELL` files, with no API responses, even after signing in and loading pages;
+  2. with the server stopped and an expired sign-in, the app opened from its copies, kept the sign-in, and showed the offline message;
+  3. after the server restarted, the `online` event reloaded the page;
+  4. the iPhone dialog has only "Got it", and the footer link matches the policy links.
+- Full suite: 77 passed.
+
 ## 2026-10-29: Security scanning in the pipeline
 
 ### What changed

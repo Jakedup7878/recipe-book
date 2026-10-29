@@ -141,7 +141,7 @@ Also:
 
 For a first version, **detect timers from the step text, in the browser.** There's no backend or database change, so it's a well-sized first feature. Letting authors set timers explicitly is the bigger, later change (milestone 7).
 
-**Where the code goes:** a new `frontend/cook.js`, loaded with `defer` before `app.js` in `index.html`, exposing a global the way `theme.js` exposes `window.RecipeTheme`. Keep the timer-finding function free of the DOM, and add this at the bottom so Node tests can load it:
+**Where the code goes:** a new `frontend/cook.js`, loaded with `defer` before `app.js` in `index.html`, exposing a global the way `theme.js` exposes `window.RecipeTheme`. Also add it to `SHELL` in `frontend/sw.js`, so the installed app has it offline (`test_service_worker_saves_every_file_the_app_needs` fails until you do). Keep the timer-finding function free of the DOM, and add this at the bottom so Node tests can load it:
 
 ```js
 if (typeof module === "object") module.exports = { findTimers };
@@ -178,7 +178,7 @@ Finish each one, with its tests, before starting the next.
 5. **Keep the screen on.** Use the Screen Wake Lock API (`navigator.wakeLock.request("screen")`, Safari on iOS 16.4+).
    - Request it when cook mode opens, release it on Exit, and request it again when the page becomes visible: the browser drops it whenever the page is hidden.
    - **Be honest about the iPhone limit:** if the phone locks or the person switches apps, the page is paused, and the alarm can't sound until they come back. The time shown stays correct thanks to milestone 3.
-   - A true lock-screen alarm needs push notifications: the installable web app (PWA) or a native app. That's a separate, later project.
+   - A true lock-screen alarm needs a notification the phone shows itself. The site has been an installable web app since 2026-10-29, but on iPhone a web app can only get notifications pushed from a server (Web Push), not schedule its own. Native local notifications (the app wrapped with Capacitor) are the simpler route. That's a separate, later project.
 6. **Styling and accessibility.**
    - Buttons at least 44 px tall, readable from across the kitchen, following the season themes and text-size setting.
    - All CSS in `styles.css`, since the Content Security Policy blocks inline styles.

@@ -45,6 +45,7 @@ function showNotice(message) {
 // tone "danger" paints the confirm button red and starts focus on Cancel.
 // content (optional) goes under the message, and gets focus; pass a function to
 // receive the confirm button, so the content can disable it or change its label.
+// cancelLabel null leaves out the Cancel button, for a dialog that only informs.
 function confirmDialog({ title, message, content, confirmLabel = "OK", cancelLabel = "Cancel", tone = "primary" }) {
   return new Promise((resolve) => {
     // Every way out calls finish() directly. The dialog's own "close" event is only a backstop:
@@ -57,7 +58,8 @@ function confirmDialog({ title, message, content, confirmLabel = "OK", cancelLab
       dialog.remove();
       resolve(confirmed);
     };
-    const cancel = h("button", { type: "button", class: "secondary", text: cancelLabel, onclick: () => finish(false) });
+    const cancel = cancelLabel === null ? null
+      : h("button", { type: "button", class: "secondary", text: cancelLabel, onclick: () => finish(false) });
     const ok = h("button", { type: "button", class: tone === "danger" ? "danger-solid" : null, text: confirmLabel,
                              onclick: () => finish(true) });
     const extra = typeof content === "function" ? content(ok) : content;
@@ -82,7 +84,7 @@ function confirmDialog({ title, message, content, confirmLabel = "OK", cancelLab
     dialog.addEventListener("close", () => finish(false));
     document.body.append(dialog);
     dialog.showModal();
-    (extra?.querySelector?.("input, select, textarea") || (tone === "danger" ? cancel : ok)).focus();
+    (extra?.querySelector?.("input, select, textarea") || (tone === "danger" && cancel || ok)).focus();
   });
 }
 
@@ -161,6 +163,15 @@ class AuthError extends Error {
   }
 }
 
+// A request that couldn't reach the server at all: offline, or the connection dropped.
+class NetworkError extends Error {
+  constructor() {
+    super(navigator.onLine === false
+      ? "You're offline. Connect to the internet and try again."
+      : "Couldn't reach Family Foodie Book. Check your connection and try again.");
+  }
+}
+
 async function cognito(action, body) {
   let response;
   try {
@@ -227,7 +238,9 @@ async function idToken() {
     });
     saveSession(data.AuthenticationResult, tokens.remember, tokens);
     return tokenStore.read().idToken;
-  } catch {
+  } catch (error) {
+    // Offline isn't a reason to sign out: keep the tokens and refresh once back online.
+    if (error.code === "Network") throw new NetworkError();
     tokenStore.clear();
     return null;
   }
@@ -261,11 +274,16 @@ async function api(path, { method = "GET", body } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(config.apiUrl + path, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(config.apiUrl + path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new NetworkError();
+  }
   if (method === "GET" && seq !== routeSeq) throw new StaleRoute(`Dropped ${path}: the page changed.`);
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
@@ -309,8 +327,55 @@ function renderNav() {
         h("a", { class: "button", href: "#/signup", text: "Create account" }),
       ];
   nav.replaceChildren(...links);
-  footer.replaceChildren(...(me ? [] : [link("#/appearance", "Appearance", "appearance")]));
+  footer.replaceChildren(...(me ? [] : [link("#/appearance", "Appearance", "appearance")]), installLink);
 }
+
+// ---------- installing the app ----------
+
+// Chrome, Edge and Android Chrome offer their own install prompt. It's kept here so the
+// footer's "Install the app" can open it. iPhones and iPads have no prompt, so there the
+// link explains Share > Add to Home Screen. Once installed, the link stays hidden.
+let installPrompt = null;
+const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1); // iPads report as Macs
+const installed = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const installLink = h("button", { type: "button", class: "link", text: "Install the app", hidden: true,
+                                  onclick: installApp });
+
+function updateInstallLink() {
+  installLink.hidden = installed() || (!installPrompt && !appleMobile);
+}
+
+async function installApp() {
+  if (installPrompt) {
+    const prompt = installPrompt;
+    installPrompt = null; // each prompt can only be shown once
+    updateInstallLink();
+    await prompt.prompt();
+    return;
+  }
+  await confirmDialog({
+    title: "Add Family Foodie Book to your Home Screen",
+    message: [
+      "1. In Safari, tap the Share button (the square with an arrow; on newer iPhones, tap ⋯ first).",
+      "2. Tap Add to Home Screen, then Add.",
+      "It then opens full screen from its own icon, like any other app.",
+    ],
+    confirmLabel: "Got it",
+    cancelLabel: null,
+  });
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault(); // the footer link offers it instead of the browser's own banner
+  installPrompt = event;
+  updateInstallLink();
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  updateInstallLink();
+});
+updateInstallLink();
 
 // A disclosure (button + list of links) rather than an ARIA menu: it works
 // with Tab and Enter like the rest of the nav, and Escape closes it.
@@ -1393,8 +1458,12 @@ function forgotView() {
 
 // ---------- routing ----------
 
+// Set when the current page couldn't load because the network was unreachable.
+let pageLoadFailed = false;
+
 async function route() {
   routeSeq += 1;
+  pageLoadFailed = false;
   showNotice(flashMessage);
   flashMessage = "";
   renderNav();
@@ -1416,9 +1485,22 @@ async function route() {
     else if (page === "appearance") appearanceView();
     else await feedView();
   } catch (error) {
+    if (error instanceof NetworkError) {
+      pageLoadFailed = true;
+      render(h("p", { class: "empty", text: "This page will load by itself as soon as you're back online." }));
+    }
     if (!(error instanceof StaleRoute)) showNotice(error.message);
   }
 }
+
+// An installed app has no reload button, so a page that couldn't load offline loads
+// again by itself when the connection comes back. Only a failed page load does this:
+// a save that failed offline leaves its form, and what was typed, alone.
+window.addEventListener("online", async () => {
+  if (!pageLoadFailed) return;
+  if (!me) await loadMe().catch(() => {});
+  await route();
+});
 
 // Errors thrown from form and button handlers end up here.
 window.addEventListener("unhandledrejection", (event) => {
@@ -1436,6 +1518,8 @@ async function start() {
   window.addEventListener("hashchange", route);
   await route();
   followDeviceLocation();
+  // sw.js keeps copies of the site's own files so the app opens offline.
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
 start();

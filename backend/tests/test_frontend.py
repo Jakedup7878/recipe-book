@@ -2,9 +2,11 @@
 app.js calls is a route API Gateway forwards, the scripts parse, and the HTML
 pages link files and anchors that exist and keep to the site's CSP."""
 
+import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -58,7 +60,7 @@ def test_pages_reference_files_that_exist(page):
     refs = {ref.lstrip("/") for ref in re.findall(r'(?:href|src)="(?![a-z]+:)([^"#]*)', read(page))} - {""}
     assert {"favicon.ico", "favicon.svg", "apple-touch-icon.png", "styles.css", "theme.js"} <= refs
     if page == "index.html":
-        assert {"app.js", "privacy.html", "terms.html"} <= refs
+        assert {"app.js", "privacy.html", "terms.html", "manifest.json"} <= refs
     assert [r for r in refs if not os.path.isfile(os.path.join(FRONTEND, r))] == []
     # Browsers also fetch /favicon.ico on their own, whatever the page links.
     assert os.path.isfile(os.path.join(FRONTEND, "favicon.ico"))
@@ -121,8 +123,59 @@ def test_sign_up_requires_agreeing_to_both_policies():
     assert sign_up.index("!terms.checked || !privacy.checked") < sign_up.index('cognito("SignUp"')
 
 
+def test_going_offline_keeps_you_signed_in():
+    # A token refresh that can't reach Cognito must not clear the saved sign-in:
+    # an installed app is often opened without a connection.
+    source = read("app.js")
+    id_token = source[source.index("async function idToken()"):source.index("async function signOut()")]
+    assert id_token.index('if (error.code === "Network") throw new NetworkError()') < id_token.index("tokenStore.clear()")
+
+
+def png_size(name):
+    with open(os.path.join(FRONTEND, name), "rb") as f:
+        header = f.read(24)
+    assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{name} isn't a PNG"
+    return "{}x{}".format(*struct.unpack(">II", header[16:24]))
+
+
+def test_manifest_makes_the_site_installable():
+    manifest = json.loads(read("manifest.json"))
+    assert manifest["name"] and manifest["short_name"]
+    assert manifest["display"] == "standalone"
+    assert manifest["start_url"] == manifest["scope"] == "./"  # relative, so beta and local dev work too
+    # Chrome needs a 192 and a 512 px icon; Android crops "maskable" ones to its own shape.
+    icons = {(icon["sizes"], icon.get("purpose", "any")): icon["src"] for icon in manifest["icons"]}
+    assert {("192x192", "any"), ("512x512", "any"), ("512x512", "maskable")} <= set(icons)
+    for (sizes, _), src in icons.items():
+        assert png_size(src) == sizes, src
+    # The colors match the default (fall, light) look, so the splash screen doesn't flash.
+    assert f'name="theme-color" content="{manifest["theme_color"]}"' in read("index.html")
+    assert f'--bg: {manifest["background_color"]};' in read("styles.css")
+
+
+def service_worker_shell():
+    return re.findall(r'"([^"]+)"', re.search(r"const SHELL = \[(.*?)\];", read("sw.js"), re.S).group(1))
+
+
+def test_service_worker_saves_every_file_the_app_needs():
+    # A file left out of SHELL would be missing when the installed app opens offline.
+    shell = set(service_worker_shell())
+    served = {name for name in os.listdir(FRONTEND) if os.path.isfile(os.path.join(FRONTEND, name))}
+    assert served - {"sw.js"} <= shell, "add new frontend files to SHELL in sw.js"
+    # config.json is written by the deploy (and by the local dev server); "./" is the home page.
+    assert shell - served == {"./", "config.json"}
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="Node.js isn't installed")
-@pytest.mark.parametrize("script", ["app.js", "theme.js"])
+def test_service_worker_handles_only_the_sites_own_files():
+    # Runs sw.js against a fake browser: see service_worker.test.js.
+    result = subprocess.run(["node", "--test", os.path.join(os.path.dirname(__file__), "service_worker.test.js")],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="Node.js isn't installed")
+@pytest.mark.parametrize("script", ["app.js", "theme.js", "sw.js"])
 def test_frontend_scripts_parse(script):
     result = subprocess.run(["node", "--check", os.path.join(FRONTEND, script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

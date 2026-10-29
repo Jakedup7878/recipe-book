@@ -326,6 +326,15 @@ nav .menu a:hover, nav .menu a[aria-current="page"], .menu .menu-item:hover { ba
 .site-footer nav a { color: var(--muted); font-size: 0.92rem; }
 .site-footer nav a[aria-current="page"] { color: var(--text); }
 #footer-links { display: contents; }
+/* "Install the app" is a button (it opens a prompt or a dialog), styled like the links beside it. */
+.site-footer nav button.link {
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 500;
+  padding: 6px 10px;
+  text-decoration: none;
+}
+.site-footer nav button.link:hover { background: color-mix(in srgb, currentColor 14%, transparent); filter: none; }
 
 /* Read by screen readers, not shown (e.g. "opens in a new tab"). */
 .visually-hidden {

@@ -27,6 +27,7 @@ This is the starting point. The details are in [`docs/`](docs/):
 - **Appearance**: four seasonal themes (fall, winter, spring, summer) or "auto" by date and hemisphere, light/dark/system mode, custom accent colors with automatic contrast fixing, fonts, text size. These settings are saved to the account.
 - **Rate limiting**: an overall limit at API Gateway, plus per-account and per-IP limits in the API.
 - **Privacy Policy and Terms of Service** at `/privacy.html` and `/terms.html`, linked in every page's footer. Sign-up requires agreeing to both.
+- **Installable app**: on Android, iPhone and desktop Chrome/Edge, the site installs with its own icon and opens full screen ("Install the app" in the footer). It opens without a connection, keeps you signed in while offline, and reloads pages by itself when the connection returns.
 
 ## Architecture in one picture
 

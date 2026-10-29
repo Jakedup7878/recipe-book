@@ -78,6 +78,20 @@ infra\.venv\Scripts\python.exe -m bandit -r backend/recipe_api backend/mail_forw
 - If a run fails, open the failed stage's CodeBuild log. Test failures appear in the *Reports* tab too.
 - Changes to `infra/pipeline_stack.py` aren't deployed by the pipeline. Deploy them by hand: `cd infra; npx cdk deploy RecipeBookPipeline --profile recipe-book`.
 
+### The installable app (service worker)
+
+The site is installable (Android, iPhone, desktop Chrome and Edge), and `frontend/sw.js` keeps copies of its files for offline use.
+- **Deploys reach installed apps by themselves.** The worker goes to the network first, so the next time an app opens online it gets the new files. Nothing needs bumping for ordinary changes.
+- **Adding a file to `frontend/`?** Add it to `SHELL` in `sw.js`. `test_service_worker_saves_every_file_the_app_needs` fails until you do.
+- **Removing a file from `SHELL`?** Also change `CACHE` (`foodie-shell-v1` → `v2`) so old copies are deleted.
+- **Testing it locally:** run the app, then in Chrome open DevTools → *Application*:
+  - *Service workers*: is it running? *Offline* simulates no connection.
+  - *Cache storage*: what's saved.
+  - *Manifest*: why the site is or isn't installable.
+
+  Service workers need HTTPS, except on `localhost`, which is why the local server works.
+- **Install it on a phone:** Android Chrome → menu → *Install app* (or the footer's *Install the app*). iPhone Safari → Share → *Add to Home Screen*.
+
 ### Changing the database (indexes and keys)
 
 The table holds real data and is RETAINed, so table changes need more care than code changes.
@@ -182,7 +196,7 @@ These are also step 1 of [plans/email-with-ses.md](plans/email-with-ses.md), so 
 | SES identities, sandbox status, receipt rules | SES console (us-east-2) → Identities; Account dashboard; Email receiving |
 | Spend and credits | AWS Settings → Billing |
 
-Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico` returns 200; the API's `/public/recipes` returns 200; `/me` with no token returns 401.
+Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico`, `/manifest.json` and `/sw.js` return 200; the API's `/public/recipes` returns 200; `/me` with no token returns 401.
 
 ## 9. Troubleshooting (problems actually met on this project)
 
@@ -198,6 +212,8 @@ Quick live checks: `https://familyfoodiebook.com/` returns 200; `/favicon.ico` r
 | Push to GitHub asks for credentials or fails | A stale stored credential | Push from a terminal; Git Credential Manager opens a browser sign-in |
 | Local server won't start: port in use | An old server process is still running | Stop it, or set `$env:PORT` to another port |
 | Console shows `403 /something` on the live site | The file doesn't exist (private S3 answers 403 for missing files) | Add the file to `frontend/`; `test_frontend.py` checks linked files exist |
+| An installed app still shows the old version after a deploy | It was opened without a connection, so it used its saved copies | Close it fully and reopen it while online. In desktop Chrome, DevTools → *Application* → *Service workers* → *Update* (or *Unregister*) |
+| The service worker didn't install (DevTools → *Application* shows an error) | A file in `SHELL` couldn't be downloaded, so the whole install was abandoned | Check every `SHELL` entry exists; `test_frontend.py` checks this for everything except `config.json`, which the deploy writes |
 | New pipeline run never starts | An earlier run is waiting for approval (QUEUED mode) | Approve, reject or stop the earlier run |
 | Sign-up emails stop arriving | Cognito's built-in sender allows only about 50 emails a day | Switch Cognito to Amazon SES; see [plans/email-with-ses.md](plans/email-with-ses.md) |
 | Sudden "Access Denied" on things that worked | The project's spend limit, or the Free plan's credits or end date | AWS Settings → Billing; check the plan and spend limit |

@@ -19,6 +19,7 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **The nav is an empty container** because what's in it depends on whether you're signed in, and `app.js` fills it. The footer is the same except for the two **policy links, which are plain HTML**, so they're there before the script runs. The `#footer-links` span (`display: contents` in the CSS) holds the one dynamic link, Appearance, for signed-out visitors.
 - **The three icon links** (`favicon.ico`, `favicon.svg`, `apple-touch-icon.png`) cover old browsers, modern browsers and iPhone home screens. The `.ico` also answers the request every browser makes to `/favicon.ico` on its own. Without it, the private S3 bucket answered 403.
 - **`<meta name="theme-color">`** colors the phone browser's toolbar. `theme.js` updates it to match the season.
+- **`<link rel="manifest">`** points at `manifest.json`, which makes the site installable as an app. `apple-mobile-web-app-title` gives the iPhone Home Screen icon the short name "Foodie Book".
 
 ### `frontend/app.js`
 **What:** The whole single-page app, about 1,300 lines in one script. In order:
@@ -36,6 +37,15 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **Talking to Cognito directly** (`cognito(action, body)` posts JSON with an `X-Amz-Target` header). This is Cognito's public user-pool API, which is how the site can have its own sign-in pages. `AUTH_MESSAGES` turns Cognito error codes into plain-English messages.
 - **Token storage (`tokenStore`)**: `sessionStorage` by default, cleared when the tab closes; `localStorage` only with "Keep me signed in". Tokens refresh automatically shortly before they expire, and signing out revokes the refresh token in the background.
 - **`api()`** adds the ID token, turns `429` into a "wait N seconds" message using `Retry-After`, signs you out on `401`, and drops data loads for pages you've left (`routeSeq` / `StaleRoute`). That last part fixed a race where a slow page could draw over a newer one.
+- **Offline** (`NetworkError`): a request that can't reach the server says so in plain words ("You're offline…") instead of the browser's "Failed to fetch".
+  - A token refresh that fails for that reason **keeps the saved sign-in**. Before, being offline more than an hour after signing in signed you out.
+  - A page that couldn't load says it will load by itself, and does when the browser fires `online`, since an installed app has no reload button.
+  - Only failed *page loads* (`pageLoadFailed`, set in `route()`) do this. A save that failed offline leaves its form, and what was typed, alone.
+- **"Install the app"** (footer):
+  - On Chrome, Edge and Android it opens the browser's saved `beforeinstallprompt` prompt.
+  - On iPhone and iPad, which have no prompt, it opens a dialog explaining Share → Add to Home Screen. It's an info-only `confirmDialog()` (`cancelLabel: null` leaves out Cancel).
+  - It's hidden where neither applies, and once the app is installed.
+- **`start()` registers `sw.js`** after the first page has drawn, so it never slows the first load.
 - **`PASSWORD_RULES`** mirrors the Cognito password policy, so the sign-up form can show a live checklist before submitting. It's kept in sync by hand with `infra/recipe_stack.py` and `backend/local_cognito.py`, with comments pointing to each other.
 - **`confirmDialog()`** uses a modal `<dialog>` (focus stays inside, the page behind is inert). Every way of closing it reports the answer immediately, because the browser's own `close` event can be delayed in background tabs. Destructive dialogs put focus on Cancel.
 - **The account menu is a disclosure** (a button plus a list of links), not an ARIA "menu", so Tab and Enter work like the rest of the page.
@@ -83,10 +93,35 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **`prefers-reduced-motion`** turns off transitions and the dialog's fade-in.
 - **`[hidden] { display: none !important }`** stops button `display` rules from un-hiding hidden elements, which was an early bug.
 
-### `frontend/favicon.svg`, `frontend/favicon.ico`, `frontend/apple-touch-icon.png`
-**What:** The site icon, an open cream recipe book with an autumn leaf on the header's rust gradient, in three formats.
+### `frontend/favicon.svg`, `frontend/favicon.ico`, `frontend/apple-touch-icon.png`, `frontend/icon-*.png`
+**What:** The site icon, an open cream recipe book with an autumn leaf on the header's rust gradient, in several formats.
 
-**Why:** Modern browsers use the SVG, which stays sharp at any size. Browsers request `/favicon.ico` on their own, and older ones only understand `.ico`, which holds 16, 32 and 48 px images. iOS uses the 180 px PNG for home-screen icons. The `.ico` and `.png` were rasterized from the same shapes as the SVG so all three match.
+**Why:**
+- Modern browsers use the SVG, which stays sharp at any size.
+- Browsers request `/favicon.ico` on their own, and older ones only understand `.ico`, which holds 16, 32 and 48 px images.
+- iOS uses the 180 px PNG for home-screen icons.
+- The installed app uses `icon-192.png` and `icon-512.png` (Chrome requires both sizes), plus `icon-maskable-512.png`:
+  - Android crops app icons to its own shape (circle, squircle…), so the maskable icon's background fills the whole square;
+  - the artwork is shrunk into the central circle Android always keeps.
+- The PNGs and `.ico` were rasterized from the same shapes as the SVG, so they all match.
+
+### `frontend/manifest.json`
+**What:** The web app manifest: the installed app's name ("Family Foodie Book", "Foodie Book" under the icon), icons, colors, and `"display": "standalone"` (full screen, without the browser's address bar).
+
+**Why:**
+- `start_url`, `scope` and `id` are **relative (`./`)**, so the same file works on the live site, on a beta site at another address, and on the local dev server.
+- Its colors are the default fall look (`theme_color` matches `index.html`; `background_color` is the page background), so the splash screen blends into the first page. `test_frontend.py` checks both.
+- It's named `.json`, not `.webmanifest`, so S3 serves it with a content type every browser accepts.
+
+### `frontend/sw.js`
+**What:** The service worker, a script the browser runs in the background for the site. It keeps copies of the site's own files (the `SHELL` list) so the app opens, and the policy pages show, without a connection.
+
+**Why it's built this way:**
+- **It only handles page loads and `SHELL` files.** API and sign-in requests, which go to other addresses, are left alone and never stored, and so is everything else. So no recipes, account details or tokens ever end up in its storage. On the local dev server the API shares the site's address, which is why it matches the exact file list rather than "anything from this site".
+- **Network first:** it always asks the server, refreshes its copy, and uses the copy only when the network fails. A deploy therefore shows up on the next load, as it did before the app was installable. The alternative, serving the copy first, loads faster but always runs one version behind.
+- **Any page load falls back to the saved `index.html` offline.** The app routes by `#hash`, so one page covers every screen.
+- **`CACHE` is versioned** (`foodie-shell-v1`). Activating a worker with a new name deletes the old copies. Change it if you remove files from `SHELL`; file *contents* refresh by themselves.
+- **Every file in `frontend/` must be in `SHELL`** (except `sw.js` itself), or the installed app would be missing it offline. `test_frontend.py` enforces this.
 
 ### `frontend/privacy.html`, `frontend/terms.html`
 **What:** The Privacy Policy and Terms of Service, served at `/privacy.html` and `/terms.html`. Each starts with a plain-language "short version", then a contents list and numbered sections, and the footer links both. Contact: `support@familyfoodiebook.com`. Minimum age: 13, with a parent's permission under 18. There's no governing-law clause yet, by the owner's choice.
@@ -258,9 +293,23 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
 - Every `#/page` link in `app.js` (such as `#/mine`) goes to a page `route()` handles; an unknown one would quietly show Home.
 - Each policy page has an "Effective" date and the support email address.
 - The sign-up form has both required checkboxes, and checks them before calling Cognito.
-- `app.js` and `theme.js` must parse (`node --check`).
+- A token refresh that can't reach Cognito keeps the saved sign-in.
+- `manifest.json` is installable: name, standalone display, relative start URL, 192/512/maskable icons whose PNG sizes match what it declares, and colors that match the page.
+- `sw.js`'s `SHELL` lists every file in `frontend/`, and only those (plus `./` and `config.json`).
+- `service_worker.test.js` passes (`node --test`).
+- `app.js`, `theme.js` and `sw.js` must parse (`node --check`).
 
 **Why:** The frontend has no build step, so nothing else would catch a typo in an API path or a JavaScript syntax error before deploy. A missing file shows up on the live site as a 403, not a 404, which is confusing to diagnose. Inline code works on the local server, which sends no CSP, but is blocked live, so it's checked here.
+
+### `backend/tests/service_worker.test.js`
+**What:** Runs `frontend/sw.js` in Node against a fake browser (a pretend `self`, `caches` and `fetch` that can be switched offline), using Node's built-in `node:test`. `test_frontend.py` runs it, so pytest and the pipeline pick it up unchanged. It checks that:
+- API and sign-in requests, and the dev server's same-address API paths, are never handled or stored;
+- online, the app's files come from the network and the saved copy is refreshed, with one copy per file whatever the query string;
+- offline, the saved copies are used, and any page load falls back to the app;
+- offline with nothing saved, a request fails as it would without the worker;
+- a new `CACHE` name deletes the old copies.
+
+**Why:** The most important property of the worker, that it never stores API data, is about behavior, which a text check can't prove. Removing the worker's address check makes two of these tests fail, which was tried when they were written.
 
 ### `backend/tests/test_mail_forwarder.py`
 **What:** The support@ forwarder, with fake S3, SES and Parameter Store clients:
