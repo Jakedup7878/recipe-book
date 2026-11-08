@@ -61,8 +61,6 @@ Everything that runs is defined in code with the AWS CDK (Python). The only exce
 | Local dev | One Python process: FastAPI + moto (fake DynamoDB) + a SQLite stand-in for Cognito |
 | Tests | pytest: API behavior, gateway routes, local dev server, infrastructure, frontend checks |
 
-AWS project: account `202518310652`, Region **us-east-2** (Ohio), CLI profile `recipe-book`. The project is on the AWS Free plan.
-
 ## Quick start
 
 Run the whole app on your computer. No AWS access is needed, and nothing is sent to AWS:
