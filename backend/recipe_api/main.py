@@ -7,7 +7,8 @@ claims arrive in the event at requestContext.authorizer.jwt.claims.
 
 Single-table layout (pk / sk):
   USER#<sub>        PROFILE              account profile, holds familyIds (a string set)
-  RECIPE#<id>       META                 recipe; family-only ones hold familyIds; gsi1pk = PUBLIC if public
+  RECIPE#<id>       META                 recipe; family-only ones hold familyIds; gsi1pk = PUBLIC if public;
+                                         a draft has neither, so it's in no feed
   RECIPE#<id>       SHARE#<familyId>     puts a family-only recipe in one family's feed (gsi1pk = FAMILYFEED#<id>)
   RECIPE#<id>       COMMENT#<commentId>  comment on a recipe
   FAMILY#<id>       META                 family name, owner, invite code
@@ -87,11 +88,8 @@ def validation_error_handler(request, error: RequestValidationError):
 
 # ---------- request / response models ----------
 
-def non_empty_lines(lines):
-    lines = [line for line in lines if line]
-    if not lines:
-        raise ValueError("needs at least one line")
-    return lines
+def without_blank_lines(lines):
+    return [line for line in lines if line]
 
 
 def text(max_length, required=True):
@@ -100,8 +98,9 @@ def text(max_length, required=True):
 
 
 def lines(max_line_length):
+    # May end up empty: only a draft may be saved that way (see require_complete).
     return Annotated[list[text(max_line_length, required=False)], Field(max_length=100),
-                     AfterValidator(non_empty_lines)]
+                     AfterValidator(without_blank_lines)]
 
 
 class ProfileUpdate(BaseModel):
@@ -151,9 +150,11 @@ class Profile(BaseModel):
 class RecipeIn(BaseModel):
     title: text(120)
     description: text(2000, required=False) = ""
-    ingredients: lines(500)
-    steps: lines(2000)
-    visibility: Literal["public", "family"] = "public"
+    ingredients: lines(500) = Field(default_factory=list, description="At least one, unless it's a draft.")
+    steps: lines(2000) = Field(default_factory=list, description="At least one, unless it's a draft.")
+    visibility: Literal["public", "family", "draft"] = Field(
+        "public", description="A draft is seen only by its author and needs only a title. Sharing it later makes "
+                              "it public or family-only; a shared recipe can't become a draft again.")
     familyIds: FamilyChoice = Field(None, description="Which of your families can see a family-only recipe. "
                                                       "Optional when you're in exactly one family, and when "
                                                       "editing (it then stays shared as it is).")
@@ -171,13 +172,14 @@ class Recipe(BaseModel):
     description: str = ""
     ingredients: list[str]
     steps: list[str]
-    visibility: Literal["public", "family"]
+    visibility: Literal["public", "family", "draft"]
     familyIds: list[str] = Field(default_factory=list,
                                  description="The families a family-only recipe is shared with: all of them for "
                                              "its author, only your own for everyone else.")
     authorId: str
     authorName: str
-    createdAt: str
+    createdAt: str = Field(description="When it was written; for a recipe that began as a draft, when it was "
+                                       "first shared.")
     updatedAt: str
 
 
@@ -438,7 +440,10 @@ def can_view(recipe, profile):
         return True
     if profile is None:
         return False
-    return recipe["authorId"] == profile["userId"] or bool(recipe_family_ids(recipe) & family_ids(profile))
+    if recipe["authorId"] == profile["userId"]:
+        return True
+    # A draft is its author's alone, whatever else the item holds.
+    return recipe["visibility"] == "family" and bool(recipe_family_ids(recipe) & family_ids(profile))
 
 
 def visible_recipe(recipe_id, profile):
@@ -463,13 +468,13 @@ def present(recipes, profile):
 
 
 def chosen_families(visibility, requested, profile, recipe=None):
-    """The families a recipe will be shared with: none for public, else some of the author's.
+    """The families a recipe will be shared with: none for public or a draft, else some of the author's.
 
     `requested` None keeps the families an existing recipe is shared with, or picks the
     author's only family. Families the recipe is already shared with may be kept (or
     dropped) even after the author has left them; new ones must be the author's own.
     """
-    if visibility == "public":
+    if visibility != "family":
         return set()
     mine = family_ids(profile)
     current = recipe_family_ids(recipe) if recipe and recipe["visibility"] == "family" else set()
@@ -495,14 +500,34 @@ def requested_families(recipe_in: RecipeIn):
     return recipe_in.familyIds
 
 
-def with_sharing(item, visibility, families):
+def require_complete(recipe):
+    """A shared recipe needs ingredients and steps; only a draft may go without."""
+    for field in ("ingredients", "steps"):
+        if not recipe.get(field):
+            raise ApiError(400, f"'{field}': needs at least one line")
+
+
+def with_sharing(item, visibility, families, previous=None):
     """`item` with its visibility set: public recipes are in the PUBLIC feed; family-only
-    ones list their families (each family's feed entry is a separate SHARE item)."""
+    ones list their families (each family's feed entry is a separate SHARE item); drafts
+    are in no feed, so only their author can find them (through the byAuthor index).
+
+    `previous` is the recipe as it was, when editing. A draft that is now being shared
+    is dated from this moment, so it enters the feeds as a new recipe.
+    """
+    was_draft = bool(previous) and previous["visibility"] == "draft"
+    if visibility == "draft":
+        if previous and not was_draft:
+            raise ApiError(400, "A recipe that's already shared can't go back to being a draft.")
+    else:
+        require_complete(item)
     item = {k: v for k, v in item.items() if k not in ("familyId", "familyIds", "gsi1pk", "gsi1sk")}
     item["visibility"] = visibility
-    if families:
+    if was_draft and visibility != "draft":
+        item["createdAt"] = item["updatedAt"] = now_iso()
+    if visibility == "family":
         item["familyIds"] = set(families)
-    else:
+    elif visibility == "public":
         item.update(gsi1pk="PUBLIC", gsi1sk=f"{item['createdAt']}#{item['recipeId']}")
     return item
 
@@ -594,7 +619,7 @@ def list_recipes(profile: Reader):
 
 
 @app.get("/me/recipes", response_model=RecipeList, tags=["recipes"],
-         summary="Every recipe you've written, public and family-only, newest first")
+         summary="Every recipe you've written, public, family-only and drafts, newest first")
 def my_recipes(profile: Reader):
     recipes, page = [], {}
     while len(recipes) < MY_RECIPES_LIMIT:
@@ -626,7 +651,7 @@ def update_recipe(id: str, recipe_in: RecipeIn, profile: Writer):
         **recipe_in.model_dump(exclude={"visibility", "familyIds", "familyId"}),
         "authorName": profile["displayName"],
         "updatedAt": now_iso(),
-    }, recipe_in.visibility, families)
+    }, recipe_in.visibility, families, previous=recipe)
     save_recipe(item, recipe_family_ids(recipe), {"ConditionExpression": "authorId = :a",
                                                   "ExpressionAttributeValues": {":a": profile["userId"]}})
     return present([item], profile)[0]
@@ -637,9 +662,10 @@ def update_recipe(id: str, recipe_in: RecipeIn, profile: Writer):
 def share_recipe(id: str, sharing: Sharing, profile: Writer):
     # Sharing "public" is how an author publishes a family recipe to everyone; it then
     # leaves its families' feeds (their members still see it under Public recipes).
+    # Sharing a draft either way is how it's published, once it has ingredients and steps.
     recipe = own_recipe(id, profile, "share")
     families = chosen_families(sharing.visibility, sharing.familyIds, profile, recipe)
-    item = with_sharing(recipe, sharing.visibility, families)
+    item = with_sharing(recipe, sharing.visibility, families, previous=recipe)
     save_recipe(item, recipe_family_ids(recipe), {"ConditionExpression": "authorId = :a",
                                                   "ExpressionAttributeValues": {":a": profile["userId"]}})
     return present([item], profile)[0]
@@ -674,6 +700,8 @@ def list_comments(id: str, profile: Reader):
 @app.post("/recipes/{id}/comments", response_model=Comment, status_code=201, tags=["comments"])
 def add_comment(id: str, comment_in: CommentIn, profile: Commenter):
     recipe = visible_recipe(id, profile)
+    if recipe["visibility"] == "draft":
+        raise ApiError(400, "Share this recipe before commenting on it.")
     comment_id = f"{int(time.time() * 1000):013d}{uuid.uuid4().hex[:8]}"
     item = {
         "pk": recipe["pk"],

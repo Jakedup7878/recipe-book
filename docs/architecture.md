@@ -70,7 +70,7 @@ All data lives in one table with a generic primary key (`pk`, `sk`) and two glob
 | pk | sk | Item | Key attributes |
 |---|---|---|---|
 | `USER#<sub>` | `PROFILE` | Account profile | `userId`, `email`, `displayName`, `familyIds` (a string set, up to 10), `preferences`, `createdAt` |
-| `RECIPE#<id>` | `META` | Recipe | `title`, `description`, `ingredients`, `steps`, `visibility`, `familyIds` (family-only recipes: a string set, up to 10), `authorId`, `authorName`, `createdAt`, `updatedAt`; `gsi1pk`/`gsi1sk` for public recipes only |
+| `RECIPE#<id>` | `META` | Recipe | `title`, `description`, `ingredients`, `steps`, `visibility`, `familyIds` (family-only recipes: a string set, up to 10), `authorId`, `authorName`, `createdAt`, `updatedAt`; `gsi1pk`/`gsi1sk` for public recipes only. `visibility` is `public`, `family` or `draft` |
 | `RECIPE#<id>` | `SHARE#<familyId>` | Puts a family-only recipe in one family's feed | `recipeId`, `familyId`, `gsi1pk = FAMILYFEED#<familyId>`, `gsi1sk` (no recipe data) |
 | `RECIPE#<id>` | `COMMENT#<commentId>` | Comment | `text`, `authorId`, `authorName`, `createdAt` |
 | `FAMILY#<id>` | `META` | Family | `name`, `ownerId`, `inviteCode`, `createdAt` |
@@ -84,6 +84,8 @@ All data lives in one table with a generic primary key (`pk`, `sk`) and two glob
 
 `gsi1sk = <createdAt>#<recipeId>` sorts both newest first.
 
+A **draft** has neither: no `gsi1pk` and no `SHARE` items. It's in no feed, so the only way to list it is the author index below.
+
 **The author index (`byAuthor`)** is keyed on `authorId` and `createdAt`, attributes every recipe already had. So when the index was added, DynamoDB filled it in for existing recipes on its own, and no backfill script was needed. Comments have the same two attributes, so they're in the index too; the "My recipes" query filters them out with `sk = META`.
 
 **Access patterns**, each answered by a key lookup, a query, or a query plus one batched read:
@@ -93,7 +95,7 @@ All data lives in one table with a generic primary key (`pk`, `sk`) and two glob
 | Public feed | Query `gsi1` where `gsi1pk = PUBLIC`, newest first, limit 50 |
 | One family's recipes | Query `gsi1` for `FAMILYFEED#<id>` (members only), then BatchGetItem the recipes it points to. Each recipe is checked again (still family-only, still shared with that family) before it's shown. |
 | Home feed for a member of N families | The above for each family, merged, with duplicates removed (one recipe can be in several of your families), sorted in the Lambda; plus the public query |
-| My recipes | Query `byAuthor` for your `authorId`, newest first, keeping only `sk = META` (up to 500) |
+| My recipes, including drafts | Query `byAuthor` for your `authorId`, newest first, keeping only `sk = META` (up to 500) |
 | A recipe and its comments | Get `RECIPE#<id>/META`; query `RECIPE#<id>` with `sk` beginning `COMMENT#` |
 | A family and its members | Get `FAMILY#<id>/META`; query `FAMILY#<id>` with `sk` beginning `MEMBER#` |
 | Join by code | Get `INVITE#<CODE>` → family ID |
@@ -115,6 +117,10 @@ Design notes:
   - Unlike profiles, recipes aren't converted on read, so plain page views never cause writes.
 - **Who sees which families.** The author sees every family a recipe is shared with. Everyone else sees only the families they're in themselves (`present()`), so a recipe never reveals the names of other families it's shared with. Comments are per recipe, so members of all its families see all its comments; the Privacy Policy says so.
 - **Families the author has left** can stay on a recipe, or be removed from it, but can't be added again. New shares must be families you're in now.
+- **Drafts are ordinary recipe items that aren't in any feed.** `visibility = draft` is the whole difference, so no new item type, index or route was needed.
+  - A draft needs only a title. The rule that a recipe has ingredients and steps moved from the request model to the moment of sharing (`require_complete()`).
+  - Sharing a draft, from the form or the recipe page, re-dates it: `createdAt` becomes the moment it's shared. Feeds sort on `createdAt`, so without this a draft started weeks ago would be published weeks down the feed.
+  - It's one-way. A shared recipe can't become a draft again, because other people's comments would be hidden from them while still stored.
 - **Rate-limit counters expire automatically** through DynamoDB TTL, at no cost.
 - **Retention.** The table and the Cognito user pool use `RemovalPolicy.RETAIN`: deleting the stack, or a change that would replace them, leaves the real data in place. Everything else is rebuildable and is deleted with the stack.
 
@@ -126,9 +132,10 @@ Design notes:
 |---|---|
 | Read public recipes and their comments | Anyone, including signed-out visitors (per-IP rate limit) |
 | Read a family recipe | Its author, and members of any family it's shared with. Anyone else gets **404, not 403**, so family recipes can't be discovered by guessing IDs. Members see only their own families' names on it. |
-| Create a recipe | Any signed-in account. A family recipe must be shared with families you're in (naming them is optional when you're in exactly one). |
+| Read a draft | Only its author. Anyone else gets 404, and it's in no feed. |
+| Create a recipe | Any signed-in account. A family recipe must be shared with families you're in (naming them is optional when you're in exactly one). A draft needs only a title; anything shared needs ingredients and steps. |
 | Edit, delete, or share a recipe (Share to Public / Share to Family) | Its author. Sharing can add only families the author is in now; families they've left can be kept or removed. |
-| Comment | Anyone who can see the recipe |
+| Comment | Anyone who can see the recipe. Nobody comments on a draft. |
 | Delete a comment | The comment's author, or the recipe's author |
 | Rename a family, make a new invite code, remove a member | The family owner |
 | Leave a family | Any member. Ownership passes to the longest-standing member, and the last one out deletes the family. |
@@ -256,4 +263,5 @@ A record of the less obvious choices, so future changes start from the reasoning
 | 16 | support@ received by SES and forwarded by a Lambda, instead of a free forwarding service or a hosted mailbox | Privacy and deletion requests stay with AWS, the only processor the Privacy Policy names. It costs cents, it's all in CDK, and it lays the groundwork for sending through SES. The trade-off: replies come from the inbox's own address, not support@. | You need to reply as support@ (add a sending path after SES production access), or want a real shared mailbox. |
 | 17 | One `SHARE` item per family a recipe is shared with, holding no recipe data, rather than a copy of the recipe per family | One recipe, one set of comments, edits in one place. The price is one extra batched read per family feed. | Feeds get slow at large sizes: copy the card fields (title, author, date) onto `SHARE` items. |
 | 18 | A `byAuthor` index on existing attributes, rather than per-author link items | DynamoDB indexes existing recipes automatically; link items would have needed a one-off backfill run against production. Comments ride along, filtered out. | You need "my comments" too (it's already indexed), or the index grows costly. |
+| 20 | Drafts saved to the account, as recipes with `visibility = draft`, rather than auto-saved in the browser | A draft started on a phone is there on a laptop, and survives clearing browser data. It reuses the recipe item, routes and author index, so nothing in the infrastructure changed. The price: a draft is saved only when you press the button. | People lose half-typed recipes by closing the tab: add a browser auto-save on top. |
 | 19 | An installable web app (PWA) whose service worker saves only the site's own files, network first, rather than a store app, or saving recipes for offline reading | Works on Android, iPhone and computers today from the same code, with no Mac, store fees or review. Deploys show up on the next load, and no account data is stored on devices. The price: no recipes offline, and no lock-screen timer alarms on iPhone. | People want recipes offline (save API answers per account, cleared on sign-out), or lock-screen alarms or store listings (wrap the app with Capacitor). |

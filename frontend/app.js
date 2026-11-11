@@ -420,27 +420,30 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest?.(".account")) closeAccountMenu();
 });
 
-// Family-only cards get the family color. familyNames maps familyId -> name, so their
-// badge can say which families; showPublic labels public cards too (for mixed lists).
+// Family-only cards get the family color, and drafts a dashed outline. familyNames maps
+// familyId -> name, so a family badge can say which families; showPublic labels public
+// cards too (for mixed lists).
 function recipeCard(recipe, { badge = true, familyNames = {}, showPublic = false } = {}) {
-  const family = recipe.visibility === "family";
-  const label = family
-    ? badge && (capitalize(familyList(recipe.familyIds, familyNames)) || "Family only")
+  const kind = { family: "family", draft: "draft" }[recipe.visibility];
+  const label = kind === "draft" ? badge && "Draft"
+    : kind === "family" ? badge && (capitalize(familyList(recipe.familyIds, familyNames)) || "Family only")
     : showPublic && "Public";
-  return h("article", { class: family ? "card recipe-card family-recipe" : "card recipe-card" },
+  return h("article", { class: kind ? `card recipe-card ${kind}-recipe` : "card recipe-card" },
     h("div", {},
       h("a", { class: "card-title", href: `#/recipe/${recipe.recipeId}`, text: recipe.title }),
-      label ? [" ", h("span", { class: family ? "badge family-badge" : "badge", text: label })] : null),
-    h("div", { class: "muted", text: `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` }),
+      label ? [" ", h("span", { class: kind ? `badge ${kind}-badge` : "badge", text: label })] : null),
+    h("div", { class: "muted", text: kind === "draft" ? `Last saved ${formatDate(recipe.updatedAt)}`
+                                                      : `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` }),
     recipe.description ? h("p", { class: "card-desc", text: recipe.description }) : null,
     h("div", { class: "muted", text: `${recipe.ingredients.length} ingredients · ${recipe.steps.length} steps` }),
   );
 }
 
 // By default the section heading says who can see the recipes, so cards skip the badge.
-// family: true colors the heading like family cards; the rest are card options.
-function recipeSection(title, subtitle, recipes, emptyState, { family = false, ...cardOptions } = {}) {
-  return h("section", { class: family ? "feed-section family-section" : "feed-section", "aria-label": title },
+// family / draft: true styles the heading like those cards; the rest are card options.
+function recipeSection(title, subtitle, recipes, emptyState, { family = false, draft = false, ...cardOptions } = {}) {
+  const kind = family ? " family-section" : draft ? " draft-section" : "";
+  return h("section", { class: `feed-section${kind}`, "aria-label": title },
     h("div", { class: "section-head" },
       h("h2", {}, title, " ", h("span", { class: "count", text: String(recipes.length) })),
       subtitle ? h("span", { class: "muted", text: subtitle }) : null),
@@ -535,18 +538,23 @@ async function feedView() {
   );
 }
 
-// Everything you've written: your family-only recipes first, then all of them.
+// Everything you've written: drafts (when you have any) and family-only recipes first,
+// then all of them.
 async function myRecipesView() {
   if (!me) return requireSignIn("Sign in to see your recipes.");
   const [{ recipes }, families] = await Promise.all([api("/me/recipes"), loadFamilies()]);
   const familyNames = namesOf(families);
   const familyOnly = recipes.filter((r) => r.visibility === "family");
+  const drafts = recipes.filter((r) => r.visibility === "draft");
   render(
     h("div", { class: "page-head" },
       h("div", {},
         h("h1", { text: "My recipes" }),
         h("div", { class: "muted", text: "Everything you've written, newest first." })),
       h("a", { class: "button", href: "#/new", text: "New recipe" })),
+    drafts.length
+      ? recipeSection("Drafts", "Only you can see these until you share them", drafts, null, { draft: true })
+      : null,
     recipeSection("Shared with family", "Only the families you picked can see these", familyOnly,
       h("div", { class: "empty" },
         h("p", { text: families.length ? "None of your recipes are family-only yet."
@@ -556,7 +564,8 @@ async function myRecipesView() {
           : h("a", { class: "button", href: "#/family", text: "Set up a family" })),
       { family: true, badge: true, familyNames }),
     recipeSection("All my recipes",
-      `${plural(familyOnly.length, "family recipe")} · ${recipes.length - familyOnly.length} public`, recipes,
+      [plural(familyOnly.length, "family recipe"), `${recipes.length - familyOnly.length - drafts.length} public`,
+       drafts.length ? plural(drafts.length, "draft") : null].filter(Boolean).join(" · "), recipes,
       h("div", { class: "empty" },
         h("p", { text: "You haven't written any recipes yet." }),
         h("a", { class: "button", href: "#/new", text: "Write your first recipe" })),
@@ -602,16 +611,21 @@ async function recipeView(id) {
   const isAuthor = me && me.userId === recipe.authorId;
   const familyNames = namesOf(families);
   const isFamily = recipe.visibility === "family";
+  // A draft is the author's alone. It can be shared once it has ingredients and steps.
+  const isDraft = recipe.visibility === "draft";
+  const complete = recipe.ingredients.length > 0 && recipe.steps.length > 0;
   const sharedWith = familyList(recipe.familyIds, familyNames);
+  const leavesDrafts = "It stops being a draft, and can't go back to being one.";
 
-  // Moves the recipe out of its families into Public recipes.
+  // Moves the recipe out of its families (or out of your drafts) into Public recipes.
   const sharePublic = async () => {
     if (!await confirmDialog({
       title: `Share "${recipe.title}" with everyone?`,
       message: [
         "Anyone, signed in or not, will be able to see it and comment.",
-        `It moves from ${sharedWith || "your family"} to Public recipes, where your families can still see it. ` +
-        "You can share it with family only again at any time.",
+        isDraft ? `${leavesDrafts} You can share it with family only instead at any time.`
+          : `It moves from ${sharedWith || "your family"} to Public recipes, where your families can still see it. ` +
+            "You can share it with family only again at any time.",
       ],
       confirmLabel: "Share to Public",
     })) return;
@@ -629,7 +643,7 @@ async function recipeView(id) {
       message: [
         "Pick the families that can see it. Their members see it and its comments, " +
         "including comments from the other families you pick.",
-        isFamily ? null : "It will no longer be public.",
+        isDraft ? leavesDrafts : isFamily ? null : "It will no longer be public.",
       ],
       content: (ok) => {
         const update = (picked) => {
@@ -646,13 +660,18 @@ async function recipeView(id) {
     go(`#/recipe/${id}`, `Shared with ${familyList(familyIds, familyNames)}.`);
   };
 
-  const sharing = isAuthor ? h("section", { class: `card sharing-card${isFamily ? " family-recipe" : ""}` },
+  const whoCanSee = isDraft
+    ? `Draft: only you. ${complete ? "Share it when it's ready." : "Add ingredients and steps, then you can share it."}`
+    : isFamily ? `Family only: ${capitalize(sharedWith)}.` : "Public: anyone can see it, signed in or not.";
+  const sharing = isAuthor ? h("section", {
+    class: `card sharing-card${isFamily ? " family-recipe" : isDraft ? " draft-recipe" : ""}`,
+  },
     h("div", {},
       h("h2", { text: "Who can see this" }),
-      h("p", { class: "muted", text: isFamily ? `Family only: ${capitalize(sharedWith)}.`
-                                              : "Public: anyone can see it, signed in or not." })),
-    h("div", { class: "row" },
-      isFamily ? h("button", { type: "button", class: "secondary", text: "Share to Public", onclick: sharePublic }) : null,
+      h("p", { class: "muted", text: whoCanSee })),
+    isDraft && !complete ? null : h("div", { class: "row" },
+      isFamily || isDraft
+        ? h("button", { type: "button", class: "secondary", text: "Share to Public", onclick: sharePublic }) : null,
       families.length || isFamily
         ? h("button", { type: "button", text: "Share to Family", onclick: shareFamily })
         : h("a", { class: "button secondary", href: "#/family", text: "Set up a family to share with" }))) : null;
@@ -673,23 +692,27 @@ async function recipeView(id) {
     h("div", { class: "page-head" },
       h("div", {},
         h("h1", { class: "recipe-title" }, recipe.title,
-          isFamily
-            ? [" ", h("span", { class: "badge family-badge",
-                                text: sharedWith ? `Family only · ${capitalize(sharedWith)}` : "Family only" })]
-            : null),
-        h("div", { class: "muted", text: `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` })),
+          isDraft ? [" ", h("span", { class: "badge draft-badge", text: "Draft" })]
+            : isFamily
+              ? [" ", h("span", { class: "badge family-badge",
+                                  text: sharedWith ? `Family only · ${capitalize(sharedWith)}` : "Family only" })]
+              : null),
+        h("div", { class: "muted", text: isDraft ? `Last saved ${formatDate(recipe.updatedAt)}`
+                                                 : `by ${recipe.authorName} · ${formatDate(recipe.createdAt)}` })),
       isAuthor ? h("div", { class: "row" },
-        h("a", { class: "button", href: `#/edit/${id}`, text: "Edit" }),
+        h("a", { class: "button", href: `#/edit/${id}`, text: isDraft ? "Keep writing" : "Edit" }),
         h("button", {
           class: "danger",
           text: "Delete",
           onclick: async () => {
             if (!await confirmDialog({
-              title: `Delete "${recipe.title}"?`, message: "The recipe and all its comments are deleted. This can't be undone.",
-              confirmLabel: "Delete recipe", tone: "danger",
+              title: `Delete "${recipe.title}"?`,
+              message: isDraft ? "This draft is deleted. This can't be undone."
+                               : "The recipe and all its comments are deleted. This can't be undone.",
+              confirmLabel: isDraft ? "Delete draft" : "Delete recipe", tone: "danger",
             })) return;
             await api(`/recipes/${id}`, { method: "DELETE" });
-            location.hash = "#/";
+            location.hash = isDraft ? "#/mine" : "#/";
           },
         })) : null),
     sharing,
@@ -697,11 +720,16 @@ async function recipeView(id) {
     h("div", { class: "recipe-layout" },
       h("section", { class: "card" },
         h("h2", { text: "Ingredients" }),
-        h("ul", { class: "ingredients" }, recipe.ingredients.map((item) => h("li", { text: item })))),
+        recipe.ingredients.length
+          ? h("ul", { class: "ingredients" }, recipe.ingredients.map((item) => h("li", { text: item })))
+          : h("p", { class: "muted", text: "None yet." })),
       h("section", { class: "card" },
         h("h2", { text: "Steps" }),
-        h("ol", { class: "steps" }, recipe.steps.map((step) => h("li", { text: step }))))),
-    h("section", { class: "card" },
+        recipe.steps.length
+          ? h("ol", { class: "steps" }, recipe.steps.map((step) => h("li", { text: step })))
+          : h("p", { class: "muted", text: "None yet." }))),
+    // Nobody else can see a draft, so there's nothing to comment on yet.
+    isDraft ? null : h("section", { class: "card" },
       h("h2", { text: `Comments (${comments.length})` }),
       comments.map((c) => commentNode(recipe, c)),
       commentForm),
@@ -749,23 +777,38 @@ async function recipeFormView(id, defaults = {}) {
           h("span", { class: "muted", text: canShareWithFamily ? "Only the families you tick" : "Start or join a family first" })))),
     pickerWrap);
   const toLines = (el) => el.value.split("\n").map((s) => s.trim()).filter(Boolean);
+  // A new recipe, or one that's still a draft, can be saved as a draft: only its author
+  // sees it, and it needs only a title. A shared recipe can't go back to being one.
+  const isDraft = existing?.visibility === "draft";
+  const canBeDraft = !existing || isDraft;
+
+  let saving = false; // a second click while the first save is on its way would save twice
+  const save = async (asDraft) => {
+    if (saving) return;
+    const familyIds = !asDraft && familyChoice.checked ? picker.picked() : null;
+    if (familyIds && !familyIds.length) throw new Error("Tick at least one family, or choose Public.");
+    const body = {
+      title: title.value, description: description.value, ingredients: toLines(ingredients),
+      steps: toLines(steps), visibility: asDraft ? "draft" : familyIds ? "family" : "public", familyIds,
+    };
+    saving = true;
+    try {
+      const saved = existing
+        ? await api(`/recipes/${id}`, { method: "PUT", body })
+        : await api("/recipes", { method: "POST", body });
+      go(`#/recipe/${saved.recipeId}`, asDraft ? "Draft saved. Only you can see it; it's under My recipes." : "");
+    } finally {
+      saving = false;
+    }
+  };
 
   render(
-    h("h1", { text: existing ? "Edit recipe" : "New recipe" }),
+    h("h1", { text: isDraft ? "Edit draft" : existing ? "Edit recipe" : "New recipe" }),
     h("form", {
       class: "card",
-      onsubmit: async (event) => {
+      onsubmit: (event) => {
         event.preventDefault();
-        const familyIds = familyChoice.checked ? picker.picked() : null;
-        if (familyIds && !familyIds.length) throw new Error("Tick at least one family, or choose Public.");
-        const body = {
-          title: title.value, description: description.value, ingredients: toLines(ingredients),
-          steps: toLines(steps), visibility: familyIds ? "family" : "public", familyIds,
-        };
-        const saved = existing
-          ? await api(`/recipes/${id}`, { method: "PUT", body })
-          : await api("/recipes", { method: "POST", body });
-        location.hash = `#/recipe/${saved.recipeId}`;
+        return save(false);
       },
     },
       h("label", {}, "Title", title),
@@ -773,7 +816,15 @@ async function recipeFormView(id, defaults = {}) {
       h("label", {}, "Ingredients", h("span", { class: "hint", text: "One per line." }), ingredients),
       h("label", {}, "Steps", h("span", { class: "hint", text: "One per line; they're numbered for you." }), steps),
       visibility,
-      h("div", {}, h("button", { type: "submit", text: existing ? "Save changes" : "Publish recipe" })),
+      h("div", { class: "row" },
+        h("button", { type: "submit", text: canBeDraft ? "Publish recipe" : "Save changes" }),
+        // Not a submit button: the form's required fields don't apply to a draft, only the title does.
+        canBeDraft ? h("button", {
+          type: "button", class: "secondary", text: isDraft ? "Save draft" : "Save as draft",
+          onclick: () => (title.reportValidity() ? save(true) : null),
+        }) : null),
+      canBeDraft ? h("p", { class: "hint", text: "Not finished? A draft is saved to your account with just a title, " +
+                                                 "and only you can see it until you publish it." }) : null,
     ),
   );
 }

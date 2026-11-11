@@ -398,6 +398,17 @@ main.narrow { max-width: 760px; }
   border-radius: 4px; background: var(--family); vertical-align: 2px;
 }
 
+/* Drafts: only their author sees them. A dashed outline, like something still pencilled in;
+   no color of their own, so they sit apart from both public and family recipes. */
+.draft-recipe { border: 1px dashed var(--muted); border-left: 4px dashed var(--muted); }
+.recipe-card.draft-recipe:hover { border-color: var(--text); }
+.badge.draft-badge { background: transparent; color: var(--text); border: 1px dashed var(--muted); }
+.draft-section .count { background: transparent; color: var(--text); border: 1px dashed var(--muted); }
+.draft-section .section-head h2::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 8px;
+  border-radius: 4px; border: 2px dashed var(--muted); vertical-align: 1px;
+}
+
 .feed-section { margin-bottom: 34px; }
 .section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 12px; }
 .section-head h2 { margin: 0; }

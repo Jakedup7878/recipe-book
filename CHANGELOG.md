@@ -2,6 +2,47 @@
 
 Notable changes to Recipe Book. Newest first.
 
+## 2026-11-11: Save a recipe as a draft
+
+### What changed for people using the site
+
+- **Save as draft** on the recipe form, beside **Publish recipe**. A draft is saved to your account, so it's on every device you sign in on, and **only you can see it**.
+- **A draft needs only a title.** Ingredients and steps can wait until you're ready to share it.
+- **My recipes has a Drafts section** at the top when you have any. Draft cards have a dashed outline and say when they were last saved.
+- **Finishing a draft:**
+  - open it and choose **Keep writing**, then **Save draft** again or **Publish recipe**;
+  - or, once it has ingredients and steps, use **Share to Public** or **Share to Family** on its page.
+- **A published draft is dated the day you share it**, so it shows up as a new recipe in the feeds.
+- **It's one-way:** a recipe that's been shared can't go back to being a draft. Other people's comments would be hidden from them while still stored.
+- Drafts have no comments, and deleting one asks first, like any recipe.
+- **Privacy Policy** (effective November 11, 2026): the short version now says drafts can be seen only by you.
+
+### How it works
+
+- No new routes, tables or indexes: `visibility` gains a third value, `"draft"`, on `POST /recipes` and `PUT /recipes/{id}`. This deploy changes only the Lambda code and the site files.
+- A draft is a recipe item with no feed key and no `SHARE` items, so it's in no feed. My recipes finds it through the `byAuthor` index, like everything else you wrote.
+- `backend/recipe_api/main.py`:
+  - `with_sharing()` holds the rules for all three routes that save a recipe;
+  - `require_complete()` asks for ingredients and steps only when a recipe is shared;
+  - `can_view()` lets a draft through only for its author, and everyone else gets 404;
+  - `add_comment()` refuses drafts.
+- `frontend/app.js`: the form's `save()`, with a guard against double clicks; draft cards, the Drafts section, and the draft version of the recipe page.
+- The local dev server's sample data gains one draft, Alice's "Cornbread Dressing". It appears after `--reset`, since sample data is only created on the first run.
+- See decision 20 in [docs/architecture.md](docs/architecture.md) for why drafts are saved to the account instead of auto-saved in the browser.
+
+### Tests
+
+- New `test_drafts_are_private_to_their_author` and `test_sharing_a_draft_publishes_it_as_a_new_recipe` (`backend/tests/test_handler.py`). To check they work, drafts were put in the public feed on purpose: both failed, and the code was restored.
+- `test_local_dev.py` checks the sample draft is in Alice's list and in neither feed.
+- **Checked in a browser on the local dev server**, signed in as Alice:
+  1. Save as draft with no title is stopped at the title field;
+  2. with only a title it saves, and the draft's page has a Draft badge, no share buttons and no comments;
+  3. a signed-out request for the draft gets 404, and it isn't in the public list;
+  4. My recipes shows it under Drafts, and again under All my recipes with a Draft badge;
+  5. after adding an ingredient and a step and saving the draft again, Share to Public published it: top of the public feed, loadable signed out, comments on;
+  6. editing the shared recipe offers only Save changes.
+- Full suite: 79 passed.
+
 ## 2026-10-29 (afternoon): Installable app (PWA)
 
 ### What changed for people using the site

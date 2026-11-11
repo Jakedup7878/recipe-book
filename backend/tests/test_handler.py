@@ -365,6 +365,96 @@ def test_my_recipes_lists_everything_i_wrote(api, monkeypatch):
     assert call(api, "GET /me/recipes", "carol")[1]["recipes"] == []
 
 
+def test_drafts_are_private_to_their_author(api):
+    _, family = call(api, "POST /families", "alice", {"name": "Washingtons"})
+    call(api, "POST /families/join", "bob", {"inviteCode": family["inviteCode"]})
+
+    # A draft needs only a title.
+    status, draft = call(api, "POST /recipes", "alice", {"title": "Gumbo", "visibility": "draft"})
+    assert status == 201 and draft["visibility"] == "draft"
+    assert draft["ingredients"] == [] and draft["steps"] == [] and draft["familyIds"] == []
+    assert call(api, "POST /recipes", "alice", {"title": " ", "visibility": "draft"})[0] == 400
+    gumbo = draft["recipeId"]
+
+    # Only its author can see it: not a family member, not a signed-out visitor, and it's in no feed.
+    assert call(api, "GET /recipes/{id}", "alice", id=gumbo)[0] == 200
+    assert call(api, "GET /recipes/{id}", "bob", id=gumbo)[0] == 404
+    assert call(api, "GET /recipes/{id}/comments", "bob", id=gumbo)[0] == 404
+    assert call(api, "GET /public/recipes/{id}", id=gumbo)[0] == 404
+    assert call(api, "GET /public/recipes/{id}/comments", id=gumbo)[0] == 404
+    for user in ("alice", "bob"):
+        assert call(api, "GET /recipes", user)[1] == {"family": [], "public": []}
+    assert call(api, "GET /public/recipes")[1]["recipes"] == []
+    assert call(api, "GET /families/{familyId}/recipes", "bob", familyId=family["familyId"])[1]["recipes"] == []
+    mine = call(api, "GET /me/recipes", "alice")[1]["recipes"]
+    assert [(x["title"], x["visibility"]) for x in mine] == [("Gumbo", "draft")]
+    assert call(api, "GET /me/recipes", "bob")[1]["recipes"] == []
+
+    # Nobody else can change, share or delete it, and nobody comments on a draft.
+    assert call(api, "PUT /recipes/{id}", "bob", {**RECIPE, "visibility": "draft"}, id=gumbo)[0] == 403
+    assert call(api, "PUT /recipes/{id}/sharing", "bob", {"visibility": "public"}, id=gumbo)[0] == 403
+    assert call(api, "DELETE /recipes/{id}", "bob", id=gumbo)[0] == 403
+    assert call(api, "POST /recipes/{id}/comments", "bob", {"text": "hi"}, id=gumbo)[0] == 404
+    status, body = call(api, "POST /recipes/{id}/comments", "alice", {"text": "note to self"}, id=gumbo)
+    assert status == 400 and "Share" in body["message"]
+
+    # Saving it as a draft again keeps it private, with what's written so far.
+    status, draft = call(api, "PUT /recipes/{id}", "alice",
+                         {"title": "Gumbo", "ingredients": ["okra"], "visibility": "draft"}, id=gumbo)
+    assert status == 200 and draft["visibility"] == "draft" and draft["ingredients"] == ["okra"]
+
+    # It can't be shared, from the form or the recipe page, until it has ingredients and steps.
+    status, body = call(api, "PUT /recipes/{id}", "alice",
+                        {"title": "Gumbo", "ingredients": ["okra"], "visibility": "public"}, id=gumbo)
+    assert status == 400 and "steps" in body["message"]
+    status, body = call(api, "PUT /recipes/{id}/sharing", "alice", {"visibility": "public"}, id=gumbo)
+    assert status == 400 and "steps" in body["message"]
+    assert call(api, "GET /recipes/{id}", "alice", id=gumbo)[1]["visibility"] == "draft"
+    assert call(api, "GET /public/recipes")[1]["recipes"] == []
+
+    # Its author can delete it.
+    assert call(api, "DELETE /recipes/{id}", "alice", id=gumbo)[0] == 204
+    assert call(api, "GET /me/recipes", "alice")[1]["recipes"] == []
+
+
+def test_sharing_a_draft_publishes_it_as_a_new_recipe(api, monkeypatch):
+    ticks = iter(range(10, 60))
+    monkeypatch.setattr(api, "now_iso", lambda: f"2026-11-11T12:00:{next(ticks)}+00:00")
+    _, family = call(api, "POST /families", "alice", {"name": "Washingtons"})
+    call(api, "POST /families/join", "bob", {"inviteCode": family["inviteCode"]})
+    _, gumbo = call(api, "POST /recipes", "alice", {**RECIPE, "title": "Gumbo", "visibility": "draft"})
+    _, pie = call(api, "POST /recipes", "alice", {"title": "Pie", "visibility": "draft"})
+    _, bread = call(api, "POST /recipes", "bob", {**RECIPE, "title": "Bread"})  # written after both drafts
+
+    # From the recipe form: saving a draft as public. It's dated from now, so it tops the feed.
+    status, shared = call(api, "PUT /recipes/{id}", "alice", {**RECIPE, "title": "Gumbo"}, id=gumbo["recipeId"])
+    assert status == 200 and shared["visibility"] == "public"
+    assert shared["createdAt"] > bread["createdAt"] > gumbo["createdAt"]
+    assert shared["updatedAt"] == shared["createdAt"]
+    gumbo_shared_at = shared["createdAt"]
+    assert [r["title"] for r in call(api, "GET /public/recipes")[1]["recipes"]] == ["Gumbo", "Bread"]
+    assert call(api, "POST /recipes/{id}/comments", "bob", {"text": "Yum"}, id=gumbo["recipeId"])[0] == 201
+
+    # From the recipe page: finish the draft, then Share to Family.
+    call(api, "PUT /recipes/{id}", "alice", {**RECIPE, "title": "Pie", "visibility": "draft"}, id=pie["recipeId"])
+    status, shared = call(api, "PUT /recipes/{id}/sharing", "alice", {"visibility": "family"}, id=pie["recipeId"])
+    assert status == 200 and shared["visibility"] == "family" and shared["familyIds"] == [family["familyId"]]
+    assert shared["createdAt"] > pie["createdAt"]
+    feed = call(api, "GET /recipes", "bob")[1]
+    assert [r["title"] for r in feed["family"]] == ["Pie"] and [r["title"] for r in feed["public"]] == ["Gumbo", "Bread"]
+    assert [(x["title"], x["visibility"]) for x in call(api, "GET /me/recipes", "alice")[1]["recipes"]] == [
+        ("Pie", "family"), ("Gumbo", "public")]
+
+    # Editing a shared recipe keeps its date, and it can't go back to being a draft.
+    _, edited = call(api, "PUT /recipes/{id}", "alice", {**RECIPE, "title": "Gumbo!"}, id=gumbo["recipeId"])
+    assert edited["createdAt"] == gumbo_shared_at and edited["updatedAt"] > gumbo_shared_at
+    status, error = call(api, "PUT /recipes/{id}", "alice", {**RECIPE, "visibility": "draft"}, id=gumbo["recipeId"])
+    assert status == 400 and "draft" in error["message"]
+    assert call(api, "PUT /recipes/{id}/sharing", "alice", {"visibility": "draft"}, id=gumbo["recipeId"])[0] == 400
+    status, still = call(api, "GET /public/recipes/{id}", id=gumbo["recipeId"])
+    assert status == 200 and still["visibility"] == "public"
+
+
 def test_recipes_saved_with_one_family_still_work_and_upgrade(api):
     # Before recipes could go to several families, a family recipe held one familyId and
     # sat in that family's feed itself (gsi1pk = FAMILYFEED#<id>), with no SHARE item.

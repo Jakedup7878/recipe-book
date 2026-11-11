@@ -110,6 +110,10 @@ def test_accounts_and_recipes_survive_a_restart(tmp_path):
         assert len(feed["family"]) == 2 and len(feed["public"]) == 3
         pie = next(r for r in feed["family"] if r["title"] == "Grandma's Sweet Potato Pie")
         assert len(pie["familyIds"]) == 2
+        # Her sample draft is in neither feed, only in her own list.
+        mine = second.api("GET", "/me/recipes", alice_again).json()["recipes"]
+        assert [r["title"] for r in mine if r["visibility"] == "draft"] == ["Cornbread Dressing"]
+        assert "Cornbread Dressing" not in [r["title"] for r in feed["family"] + feed["public"]]
         assert second.sign_in("erin@example.com", "Recipes4Erin").status_code == 200
     finally:
         second.stop()

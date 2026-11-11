@@ -79,6 +79,12 @@ SAMPLE_RECIPES = [
                   "Pour into the crust and bake at 350°F for 50 minutes, until just set."],
         "visibility": "family",
     }),
+    ("alice@example.com", {
+        "title": "Cornbread Dressing",
+        "description": "Still working out the amounts. A draft, so only Alice can see it.",
+        "ingredients": ["1 pan day-old cornbread", "2 celery stalks", "1 onion", "2 cups chicken stock"],
+        "visibility": "draft",  # no steps yet: a draft needs only a title
+    }),
 ]
 
 

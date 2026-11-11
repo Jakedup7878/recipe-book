@@ -54,7 +54,12 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
   - Share to Family opens `confirmDialog()` with a `familyPicker()`: styled checkboxes, one per family, with any families you've left listed so they can be unticked.
   - The dialog's `content` option takes a function that receives the confirm button, so the picker can keep its label ("Share with 2 families") and disabled state in step with the ticks.
   - The recipe form reuses the same picker under a Public / Family-only choice.
-- **My recipes** (`#/mine`) lists your family-only recipes first, then all of them, from `GET /me/recipes`.
+- **My recipes** (`#/mine`) lists your drafts (when you have any), then your family-only recipes, then all of them, from `GET /me/recipes`.
+- **Drafts**: the recipe form has **Save as draft** beside **Publish recipe**, for a new recipe or one that's still a draft.
+  - It's a plain button, not a submit button, so the form's `required` fields don't block it. Only the title is checked (`reportValidity()`).
+  - `save()` ignores a second click while the first save is on its way, so a double click can't save two copies.
+  - A draft's page shows a Draft badge and no comments. Once it has ingredients and steps, its "Who can see this" panel offers Share to Public and Share to Family, which publish it.
+  - Draft cards have a dashed outline (`recipeCard()` adds `draft-recipe`), and say when they were last saved.
 - **Family-only cards are colored** wherever they appear (`recipeCard()` adds `family-recipe`); `recipeSection(..., { family: true })` colors a section's heading to match.
 - **Invite links** are `#/join/<code>`. Signed-out visitors go to sign-in first and come back afterwards (`returnTo` in `sessionStorage`). The join form also accepts a pasted link.
 - **Copy to clipboard** tries the Clipboard API, then falls back to copying from a hidden text field. Some in-app browsers block the Clipboard API.
@@ -88,6 +93,7 @@ These files are uploaded to S3 exactly as they are and served by CloudFront. The
 - **No inline styles anywhere**, because the CSP blocks them. That's why, for example, the copy fallback's hidden field uses the `.copy-buffer` class.
 - **The "stretched link" pattern** makes whole recipe cards clickable while keeping one real link per card for keyboards and screen readers.
 - **A family color (`--family`) per season and mode**, a hue apart from that season's accent (green in fall, plum in winter, teal-blue in spring, berry in summer), checked to at least 4.5:1 contrast for small text on its tinted background. `--family-soft` and `--family-border` are derived from it like the accent ones.
+- **Drafts get a dashed outline and no color of their own** (`.draft-recipe`, `.draft-badge`, `.draft-section`), using the existing text and muted colors, so they work in every season and mode without new palette entries.
 - **Choice cards (`.choice`)** are real checkboxes and radios with `appearance: none`, drawn larger. They keep keyboard use, focus rings and screen-reader labels for free. The CSS variable `--choice` switches them between the family color and the accent (for Public).
 - **Mobile rules**: the nav wraps under the brand, the account menu goes full width, and dialog buttons stretch. Everything was checked at 375 px with no sideways scrolling.
 - **`prefers-reduced-motion`** turns off transitions and the dialog's fade-in.
@@ -155,7 +161,7 @@ Only this folder is packaged into the Lambda function.
 - **Identity**: `claims_from()` takes the verified JWT claims API Gateway put in the event. Locally it falls back to the local token verifier, or to an `X-Dev-User` header when local dev headers are enabled.
 - **Dependencies**: `Reader`, `Writer` and `Commenter` (signed-in, each with its own rate-limit bucket) and `anonymous` (per-IP limit for public routes).
 - **Profiles**: `get_or_create_profile()` creates a profile on first use, with the display name taken from the sign-up `name` claim. It also upgrades old single-family profiles.
-- **Recipes**: create, list feeds, **my recipes** (`GET /me/recipes`), get, update, **share** (`PUT /recipes/{id}/sharing`: public, or a set of your families), delete; with visibility and family checks.
+- **Recipes**: create, list feeds, **my recipes** (`GET /me/recipes`), get, update, **share** (`PUT /recipes/{id}/sharing`: public, or a set of your families), delete; with visibility and family checks. A recipe can be saved as a **draft** (`visibility: "draft"`), which only its author sees.
 - **Comments**: list, add, delete.
 - **Families**: create, list mine, invite preview, join, rename, family recipes, leave, rotate the invite code, remove a member.
 - **Public routes** for signed-out visitors.
@@ -171,9 +177,10 @@ Only this folder is packaged into the Lambda function.
 - **`upgrade_single_family()`** moves old data forward on read, in one conditional update, so no migration job was needed.
 - **Sharing has its own route, `PUT /recipes/{id}/sharing`**, so the recipe page's Share buttons don't have to send the whole recipe back. `PUT /recipes/{id}` can still change visibility too, for the edit form. Both go through the same helpers, so the rules live in one place:
   - `chosen_families()` holds the rules: only the author, only your own families (families you've since left may be kept or dropped), at least one, at most 10.
-  - `with_sharing()` shapes the recipe item.
+  - `with_sharing()` shapes the recipe item, and holds the draft rules: a draft needs only a title, anything shared must pass `require_complete()` (ingredients and steps), a draft being shared is re-dated to now so it enters the feeds as new, and a shared recipe can't become a draft again.
   - `save_recipe()` writes the recipe and its `SHARE` items in one transaction.
 - **`family_feed()` re-reads and re-checks each recipe** behind a family's `SHARE` items. Share items hold no recipe data, so there's nothing to keep in sync on edits, and a leftover share can never leak a recipe.
+- **`can_view()`** lets a draft through only for its author. A draft holds no families and no feed key, so the older code would have refused it too, but the rule is written out so it doesn't depend on what else the item holds.
 - **`present()`** is the one place recipes are shaped for a viewer: current author names, and `familyIds` trimmed to the viewer's own families unless they wrote the recipe.
 - **`recipe_family_ids()`** reads both the new `familyIds` set and the old single `familyId`, so recipes saved before multi-family sharing keep working; they're upgraded the next time they're saved.
 - **`batch_get()`** wraps BatchGetItem's 100-key limit and its "unprocessed keys" retry, used by both names and feeds.
@@ -221,7 +228,7 @@ Only this folder is packaged into the Lambda function.
 - a local `/config.json` that points the site at those;
 - the `frontend/` folder served as static files.
 
-On the first run it creates three test accounts (alice, bob and carol), sample recipes, and two families, so that alice is in both. Alice's family pie is shared with both of her families. Flags: `--reset` (wipe local data), `--empty` (no sample data), `--data-dir`, and the `PORT` environment variable.
+On the first run it creates three test accounts (alice, bob and carol), sample recipes, and two families, so that alice is in both. Alice's family pie is shared with both of her families, and she has one draft with no steps yet. Flags: `--reset` (wipe local data), `--empty` (no sample data), `--data-dir`, and the `PORT` environment variable.
 
 **Why:**
 - **Nothing touches AWS.** It's free, works offline, and it's safe to break things.
@@ -269,6 +276,11 @@ On the first run it creates three test accounts (alice, bob and carol), sample r
   - other members see only their own families' names;
   - unsharing, keeping or dropping a family the author has left, sharing to Public, and deleting it with its shares;
 - My recipes: everything you wrote, comments excluded, still listed after leaving a family;
+- drafts:
+  - a draft needs only a title, and only its author can see, change, share or delete it (not a family member, not a signed-out visitor, no feed);
+  - nobody comments on one, and it can't be shared until it has ingredients and steps;
+  - sharing it, from the form or the recipe page, re-dates it so it tops the feed, and editing afterwards keeps that date;
+  - a shared recipe can't become a draft again;
 - recipes saved with one `familyId` still showing up, and upgrading to `SHARE` items when edited;
 - upgrading old single-family profiles;
 - validation errors, dropped blank lines;
